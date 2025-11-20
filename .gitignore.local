@@ -1,0 +1,27 @@
+gitignore
+
+# 不忽略 .gitignore 文件本身（这是Git的常见实践）
+!.gitignore
+
+AppData/
+
+assets/wallpaper/
+
+node_modules/
+
+.env
+
+/public/assets
+
+**/.DS_Store
+
+config.env
+
+# Update scripts
+update.bat
+
+# Environment files
+*.env
+*config.env
+*.local
+*.backup
