@@ -295,35 +295,68 @@ function transformSpecialBlocks(text) {
 
     // Process Tool Requests
     processed = processed.replace(TOOL_REGEX, (match, content) => {
-        // Regex to find tool name in either XML format (<tool_name>...</tool_name>) or key-value format (tool_name: ...)
-        const toolNameRegex = /<tool_name>([\s\S]*?)<\/tool_name>|tool_name:\s*([^\n\r]*)/;
-        const toolNameMatch = content.match(toolNameRegex);
+        // Check if this is a DailyNote tool call with the 'create' command
+        const isDailyNoteCreate = /tool_name:\s*「始」\s*DailyNote\s*「末」/.test(content) &&
+                                  /command:\s*「始」\s*create\s*「末」/.test(content);
 
-        // The tool name will be in capture group 1 or 2. Default to a fallback.
-        let toolName = 'Processing...';
-        if (toolNameMatch) {
-            // Use the first non-empty capture group
-            let extractedName = (toolNameMatch[1] || toolNameMatch[2] || '').trim();
+        if (isDailyNoteCreate) {
+            // --- It's a DailyNote Tool, render it as a diary bubble ---
+            const maidRegex = /(?:maid|maidName):\s*「始」([^「」]*)「末」/;
+            const dateRegex = /Date:\s*「始」([^「」]*)「末」/;
+            const contentRegex = /Content:\s*「始」([\s\S]*?)「末」/;
+
+            const maidMatch = content.match(maidRegex);
+            const dateMatch = content.match(dateRegex);
+            const contentMatch = content.match(contentRegex);
+
+            const maid = maidMatch ? maidMatch[1].trim() : '';
+            const date = dateMatch ? dateMatch[1].trim() : '';
+            const diaryContent = contentMatch ? contentMatch[1].trim() : '[日记内容解析失败]';
+
+            let html = `<div class="maid-diary-bubble">`;
+            html += `<div class="diary-header">`;
+            html += `<span class="diary-title">Maid's Diary</span>`;
+            if (date) {
+                html += `<span class="diary-date">${escapeHtml(date)}</span>`;
+            }
+            html += `</div>`;
             
-            // Clean the extracted name: remove special markers and trailing commas
-            if (extractedName) {
-                extractedName = extractedName.replace(/「始」|「末」/g, '').replace(/,$/, '').trim();
+            if (maid) {
+                html += `<div class="diary-maid-info">`;
+                html += `<span class="diary-maid-label">Maid:</span> `;
+                html += `<span class="diary-maid-name">${escapeHtml(maid)}</span>`;
+                html += `</div>`;
             }
 
-            if (extractedName) {
-                toolName = extractedName;
+            html += `<div class="diary-content">${escapeHtml(diaryContent)}</div>`;
+            html += `</div>`;
+
+            return html;
+        } else {
+            // --- It's a regular tool call, render it normally ---
+            const toolNameRegex = /<tool_name>([\s\S]*?)<\/tool_name>|tool_name:\s*「始」([^「」]*)「末」/;
+            const toolNameMatch = content.match(toolNameRegex);
+
+            let toolName = 'Processing...';
+            if (toolNameMatch) {
+                let extractedName = (toolNameMatch[1] || toolNameMatch[2] || '').trim();
+                if (extractedName) {
+                    extractedName = extractedName.replace(/「始」|「末」/g, '').replace(/,$/, '').trim();
+                }
+                if (extractedName) {
+                    toolName = extractedName;
+                }
             }
+
+            const escapedFullContent = escapeHtml(content);
+            return `<div class="vcp-tool-use-bubble">` +
+                   `<div class="vcp-tool-summary">` +
+                   `<span class="vcp-tool-label">VCP-ToolUse:</span> ` +
+                   `<span class="vcp-tool-name-highlight">${escapeHtml(toolName)}</span>` +
+                   `</div>` +
+                   `<div class="vcp-tool-details"><pre>${escapedFullContent}</pre></div>` +
+                   `</div>`;
         }
-
-        const escapedFullContent = escapeHtml(content);
-        // Construct the new HTML with a hidden details part
-        return `<div class="vcp-tool-use-bubble">` +
-               `<div class="vcp-tool-summary">` +
-               `<span class="vcp-tool-label">VCP-ToolUse:</span> ` +
-               `<span class="vcp-tool-name-highlight">${escapeHtml(toolName)}</span>` +
-               `</div>` +
-               `<div class="vcp-tool-details"><pre>${escapedFullContent}</pre></div>` +
-               `</div>`;
     });
 
     // Process Daily Notes
@@ -551,14 +584,6 @@ function calculateDepthByTurns(messageId, history) {
  * @returns {string} The processed text.
  */
 function preprocessFullContent(text, settings = {}, messageRole = 'assistant', depth = 0) {
-    // --- 应用正则规则（前端）---
-    const currentSelectedItem = mainRendererReferences.currentSelectedItemRef.get();
-    const agentConfig = currentSelectedItem?.config || currentSelectedItem;
-
-    if (agentConfig?.stripRegexes && Array.isArray(agentConfig.stripRegexes)) {
-        text = applyFrontendRegexRules(text, agentConfig.stripRegexes, messageRole, depth);
-    }
-    
     // 🟢 新增：第一层修复 - Markdown 图片语法修复
     text = fixEmoticonUrlsInMarkdown(text);
     
@@ -1116,6 +1141,15 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true)
         const depth = calculateDepthByTurns(message.id, historyForDepthCalc);
         // --- 深度计算结束 ---
 
+        // --- 应用前端正则规则 ---
+        // 核心修复：将正则规则应用移出 preprocessFullContent，以避免在流式传输的块上执行
+        // 这样可以确保正则表达式在完整的消息内容上运行
+        const agentConfigForRegex = currentSelectedItem?.config || currentSelectedItem;
+        if (agentConfigForRegex?.stripRegexes && Array.isArray(agentConfigForRegex.stripRegexes)) {
+            textToRender = applyFrontendRegexRules(textToRender, agentConfigForRegex.stripRegexes, message.role, depth);
+        }
+        // --- 正则规则应用结束 ---
+
         const processedContent = preprocessFullContent(textToRender, globalSettings, message.role, depth);
         let rawHtml = markedInstance.parse(processedContent);
         
@@ -1360,6 +1394,15 @@ async function finalizeStreamedMessage(messageId, finishReason, context) {
     // 我们现在只传递必要的元数据。
     await streamManager.finalizeStreamedMessage(messageId, finishReason, context);
 
+    // --- 核心修复：流式结束后，对完整内容重新应用前端正则 ---
+    // 这是为了解决流式传输导致正则表达式（如元思考链）被分割而无法匹配的问题
+    const finalMessage = mainRendererReferences.currentChatHistoryRef.get().find(m => m.id === messageId);
+    if (finalMessage) {
+        // 使用 updateMessageContent 来安全地重新渲染消息，这将触发我们之前添加的正则逻辑
+        updateMessageContent(messageId, finalMessage.content);
+    }
+    // --- 修复结束 ---
+
     // After the stream is finalized in the DOM, find the message and render any mermaid blocks.
     const messageItem = mainRendererReferences.chatMessagesDiv.querySelector(`.message-item[data-message-id="${messageId}"]`);
     if (messageItem) {
@@ -1438,6 +1481,14 @@ async function renderFullMessage(messageId, fullContent, agentName, agentId) {
 
     // --- Update DOM ---
     const globalSettings = mainRendererReferences.globalSettingsRef.get();
+    // --- 应用前端正则规则 (修复流式处理问题) ---
+    const agentConfigForRegex = currentSelectedItem?.config || currentSelectedItem;
+    const messageFromHistoryForRegex = currentChatHistoryArray.find(msg => msg.id === messageId);
+    if (agentConfigForRegex?.stripRegexes && Array.isArray(agentConfigForRegex.stripRegexes) && messageFromHistoryForRegex) {
+        const depth = calculateDepthByTurns(messageId, currentChatHistoryArray);
+        fullContent = applyFrontendRegexRules(fullContent, agentConfigForRegex.stripRegexes, messageFromHistoryForRegex.role, depth);
+    }
+    // --- 正则规则应用结束 ---
     const processedFinalText = preprocessFullContent(fullContent, globalSettings, 'assistant');
     let rawHtml = markedInstance.parse(processedFinalText);
 
@@ -1479,6 +1530,13 @@ function updateMessageContent(messageId, newContent) {
     // --- 按“对话轮次”计算深度 ---
     const depthForUpdate = calculateDepthByTurns(messageId, currentChatHistoryForUpdate);
     // --- 深度计算结束 ---
+    // --- 应用前端正则规则 (修复流式处理问题) ---
+    const currentSelectedItem = mainRendererReferences.currentSelectedItemRef.get();
+    const agentConfigForRegex = currentSelectedItem?.config || currentSelectedItem;
+    if (agentConfigForRegex?.stripRegexes && Array.isArray(agentConfigForRegex.stripRegexes) && messageInHistory) {
+        textToRender = applyFrontendRegexRules(textToRender, agentConfigForRegex.stripRegexes, messageInHistory.role, depthForUpdate);
+    }
+    // --- 正则规则应用结束 ---
     const processedContent = preprocessFullContent(textToRender, globalSettings, messageInHistory?.role || 'assistant', depthForUpdate);
     let rawHtml = markedInstance.parse(processedContent);
 
