@@ -11,15 +11,47 @@ class RAGObserverConfig {
         this.isConnecting = false;
     }
 
-    // 从URL查询参数读取settings
-    loadSettings() {
+    // 异步加载设置：优先从URL读取，其次尝试读取 config.env
+    async loadSettings() {
+        // 1. 尝试从 URL 获取
         const params = new URLSearchParams(window.location.search);
-        const settings = {
-            vcpLogUrl: params.get('vcpLogUrl') || 'ws://127.0.0.1:5890',
-            vcpLogKey: params.get('vcpLogKey') || ''
+        let vcpLogUrl = params.get('vcpLogUrl');
+        let vcpLogKey = params.get('vcpLogKey');
+
+        // 2. 如果 URL 中缺失关键信息，尝试从 config.env 读取
+        if (!vcpLogUrl || !vcpLogKey) {
+            try {
+                console.log('URL参数缺失，尝试读取 config.env...');
+                const response = await fetch('./config.env');
+                if (response.ok) {
+                    const text = await response.text();
+                    // 解析 env 文件
+                    const envConfig = {};
+                    text.split('\n').forEach(line => {
+                        const [key, value] = line.split('=');
+                        if (key && value) {
+                            envConfig[key.trim()] = value.trim();
+                        }
+                    });
+                    
+                    if (!vcpLogUrl) vcpLogUrl = envConfig['vcpLogUrl'];
+                    if (!vcpLogKey) vcpLogKey = envConfig['vcpLogKey'];
+                    console.log('成功从 config.env 加载配置');
+                } else {
+                    console.warn('config.env 读取失败:', response.status);
+                }
+            } catch (e) {
+                console.warn('无法读取 config.env (可能是跨域或文件不存在):', e);
+            }
+        }
+
+        // 3. 设置默认值
+        this.settings = {
+            vcpLogUrl: vcpLogUrl || 'ws://127.0.0.1:6005',
+            vcpLogKey: vcpLogKey || '111111'
         };
-        this.settings = settings;
-        console.log('Loaded settings from URL:', this.settings);
+
+        console.log('Final Settings Loaded:', this.settings);
         return this.settings;
     }
 
@@ -34,11 +66,11 @@ class RAGObserverConfig {
     }
 
     // 自动连接WebSocket
-    autoConnect(isReconnect = false) {
+    async autoConnect(isReconnect = false) {
         if (this.isConnecting) return;
         this.isConnecting = true;
 
-        const settings = this.loadSettings();
+        const settings = await this.loadSettings();
         
         // Theme is now handled by the async DOMContentLoaded listener.
         
@@ -114,20 +146,6 @@ class RAGObserverConfig {
             console.error('已达到最大重连次数，停止重连。');
         }
     }
-
-    // watchSettings is deprecated in favor of the onThemeUpdated IPC listener
-    /*
-    watchSettings(interval = 5000) {
-        setInterval(() => {
-            const newSettings = this.loadSettings();
-            if (newSettings.currentThemeMode !== this.settings?.currentThemeMode) {
-                this.applyTheme(newSettings.currentThemeMode);
-                this.settings = newSettings;
-                console.log('主题已更新:', newSettings.currentThemeMode);
-            }
-        }, interval);
-    }
-    */
 }
 
 // 页面加载时自动初始化
