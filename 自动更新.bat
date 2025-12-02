@@ -1,88 +1,193 @@
 @echo off
 setlocal enabledelayedexpansion
-REM åˆ‡æ¢åˆ° UTF-8 ç¼–ç ï¼Œé˜²æ­¢ä¸­æ–‡ä¹±ç 
-chcp 65001 >nul 2>&1
 
 echo ========================================
-echo        VCPChat å‰ç«¯è‡ªåŠ¨æ›´æ–° (é˜²è¦†ç›–ç‰ˆ)
+echo VCPChat Ç°¶Ë¸üĞÂ½Å±¾ (ºó¶ËÍ¬¿îÂß¼­°æ)
 echo ========================================
 echo.
 
 cd /d "%~dp0"
 
-REM ----------------------------------------
-REM 1. ç¡®ä¿åœ¨ custom åˆ†æ”¯
-REM ----------------------------------------
+REM ====================================
+REM ½×¶Î 0: »·¾³¼ì²éÓë±£»¤
+REM ====================================
+echo [½×¶Î 0/4] »·¾³¼ì²é
+echo ----------------------------------------
+
+REM ¼ì²éµ±Ç°·ÖÖ§
 for /f "tokens=*" %%i in ('git rev-parse --abbrev-ref HEAD') do set CURRENT_BRANCH=%%i
 if not "!CURRENT_BRANCH!"=="custom" (
-    echo [çŠ¶æ€] å½“å‰åœ¨ !CURRENT_BRANCH! åˆ†æ”¯ï¼Œæ­£åœ¨åˆ‡æ¢åˆ° custom...
-    git checkout custom 2>nul
+    echo [¾¯¸æ] µ±Ç°²»ÔÚ custom ·ÖÖ§£¬ÕıÔÚÇĞ»»...
+    git checkout custom >nul 2>&1
     if !errorlevel! neq 0 (
-        echo [é”™è¯¯] æ— æ³•åˆ‡æ¢åˆ†æ”¯ï¼Œè¯·å…ˆå°è¯•æ‰‹åŠ¨è¿è¡Œ: git checkout -b custom
+        echo [´íÎó] ÎŞ·¨ÇĞ»»µ½ custom ·ÖÖ§
         pause
-        exit /b
+        exit /b 1
+    )
+    echo [×´Ì¬] ÒÑÇĞ»»µ½ custom ·ÖÖ§
+)
+
+REM ¼ì²éÎ´Ìá½»µÄ¸ü¸Ä
+git diff --quiet
+if !errorlevel! neq 0 (
+    echo.
+    echo [¾¯¸æ] ¼ì²âµ½Î´Ìá½»µÄ¸ü¸Ä£º
+    git status --short
+    echo.
+    choice /C YNC /N /M "ÊÇ·ñÌá½»ÕâĞ©¸ü¸Ä? (Y=Ìá½» N=ºöÂÔ C=È¡Ïû) "
+    if errorlevel 3 goto :END
+    if errorlevel 2 (
+        echo [ÌáÊ¾] ÄãÑ¡ÔñÁËºöÂÔ±¾µØ¸ü¸Ä...
+    ) else (
+        git add -A
+        set /p COMMIT_MSG="ÇëÊäÈëÌá½»ËµÃ÷: "
+        if "!COMMIT_MSG!"=="" set COMMIT_MSG=±¾µØÅäÖÃ±£´æ
+        git commit -m "!COMMIT_MSG!"
+        echo [×´Ì¬] ±¾µØ¸ü¸ÄÒÑÌá½»
     )
 )
 
-REM ----------------------------------------
-REM 2. ä¿æŠ¤ä½ çš„æœ¬åœ°ä¿®æ”¹ (æ”¾å…¥ä¿é™©ç®±)
-REM ----------------------------------------
-git diff --quiet
+echo [×´Ì¬] »·¾³×¼±¸¾ÍĞ÷
+echo.
+
+REM ====================================
+REM ½×¶Î 1: Í¬²½Ô¶³Ì²Ö¿â
+REM ====================================
+echo [½×¶Î 1/4] Í¬²½Ô¶³Ì²Ö¿â
+echo ----------------------------------------
+
+echo [1/2] »ñÈ¡¹Ù·½¸üĞÂ (Upstream)...
+git fetch upstream main >nul 2>&1
 if !errorlevel! neq 0 (
-    echo [ä¿æŠ¤] æ£€æµ‹åˆ°ä½ æœ‰ä¿®æ”¹é…ç½®æ–‡ä»¶ï¼Œæ­£åœ¨è‡ªåŠ¨ä¿å­˜...
-    git add -A
-    git commit -m "Auto-save: è‡ªåŠ¨ä¿å­˜æœ¬åœ°é…ç½®" >nul
-    echo [æˆåŠŸ] æœ¬åœ°é…ç½®å·²ä¿å­˜ã€‚
+    echo [´íÎó] ÎŞ·¨Á¬½Ó¹Ù·½²Ö¿â£¬Çë¼ì²éÍøÂç
+    pause
+    exit /b 1
 )
 
-REM ----------------------------------------
-REM 3. è·å–å®˜æ–¹æœ€æ–°ä»£ç 
-REM ----------------------------------------
-echo.
-echo [1/3] æ­£åœ¨è·å–å®˜æ–¹æ›´æ–°...
-git fetch upstream main
+echo [2/2] ¼ì²é¸üĞÂ×´Ì¬...
+REM ¼ì²éÊÇ·ñÓĞĞÂÌá½»
+for /f %%i in ('git rev-list --count custom..upstream/main 2^>nul') do set NEW_COMMITS=%%i
 
-REM ----------------------------------------
-REM 4. åˆå¹¶ä»£ç  (å†²çªæ—¶ä¼˜å…ˆä¿ç•™ä½ çš„)
-REM ----------------------------------------
-echo [2/3] æ­£åœ¨åˆå¹¶æ›´æ–°...
-git merge upstream/main --no-edit 2>nul
+if "!NEW_COMMITS!"=="0" (
+    echo [ÌáÊ¾] µ±Ç°ÒÑÊÇ×îĞÂ°æ±¾£¬ÎŞĞè¸üĞÂ
+    goto :UPDATE_DEPS
+)
+
+echo.
+echo [·¢ÏÖĞÂÌá½»] !NEW_COMMITS! ¸ö
+echo [¹Ù·½¸üĞÂÈÕÖ¾]
+git log custom..upstream/main --oneline --graph -5
+echo.
+
+choice /C YN /T 10 /D Y /N /M "È·ÈÏÒªºÏ²¢¹Ù·½¸üĞÂÂğ? (Y=ÊÇ N=·ñ, 10Ãë×Ô¶¯Ñ¡ÊÇ) "
+if errorlevel 2 goto :END
+echo.
+
+REM ¼ÇÂ¼ºÏ²¢Ç°µÄ commit hash£¬ÓÃÓÚºóĞø±È¶ÔÒÀÀµ
+for /f "tokens=*" %%i in ('git rev-parse HEAD') do set BEFORE_MERGE=%%i
+
+REM ====================================
+REM ½×¶Î 2: ºÏ²¢Óë³åÍ»´¦Àí (ºËĞÄ)
+REM ====================================
+echo [½×¶Î 2/4] ºÏ²¢¸üĞÂ
+echo ----------------------------------------
+
+echo [Ö´ĞĞ] ÕıÔÚºÏ²¢ upstream/main...
+git merge upstream/main --no-edit >nul 2>&1
 set MERGE_EXIT=!errorlevel!
 
-if !MERGE_EXIT! neq 0 (
+REM ¼ì²éÊÇ·ñÓĞ³åÍ» (ÕâÊÇÄã×îÏëÒªµÄÂß¼­)
+git diff --name-only --diff-filter=U >nul 2>&1
+set HAS_CONFLICT=!errorlevel!
+
+if !HAS_CONFLICT! equ 0 (
     echo.
-    echo [æ³¨æ„] å‘ç°é…ç½®æ–‡ä»¶å†²çªï¼
-    echo [å¤„ç†] æ­£åœ¨å¼ºåˆ¶ä¿ç•™ä½ çš„é…ç½®...
-    
-    REM === æ ¸å¿ƒé­”æ³•ï¼šé‡åˆ°å†²çªï¼Œå¼ºåˆ¶ä¿ç•™â€œæˆ‘â€çš„ç‰ˆæœ¬ ===
-    git checkout --ours .
-    git add .
-    git commit -m "Merge fix: å¼ºåˆ¶ä¿ç•™æœ¬åœ°é…ç½®" >nul
-    
-    echo [æˆåŠŸ] å·²è§£å†³å†²çªï¼Œä½ çš„é…ç½®æœªè¢«è¦†ç›–ã€‚
+    echo ========================================
+    echo [¾¯¸æ] ¼ì²âµ½ÎÄ¼ş³åÍ»£¡×Ô¶¯ºÏ²¢ÒÑÔİÍ£¡£
+    echo ========================================
+    echo.
+    echo [³åÍ»ÎÄ¼şÁĞ±í]
+    git status --short | findstr "^UU"
+    echo.
+    echo [Çë°´ÒÔÏÂ²½ÖèÊÖ¶¯´¦Àí]
+    echo   1. ´ò¿ª VS Code£¬ÔÚ×ó²àÔ´´úÂë¹ÜÀíÖĞ²é¿´³åÍ»ÎÄ¼ş¡£
+    echo   2. ¾ö¶¨±£ÁôÄÄ¸ö°æ±¾£º
+    echo      - ±£ÁôÄãµÄÅäÖÃ: git checkout --ours ÎÄ¼şÃû
+    echo      - Ê¹ÓÃ¹Ù·½´úÂë: git checkout --theirs ÎÄ¼şÃû
+    echo   3. ´¦ÀíÍêËùÓĞÎÄ¼şºó:
+    echo      git add .
+    echo      git commit -m "½â¾ö³åÍ»"
+    echo.
+    echo ½Å±¾ÒÑÍ£Ö¹£¬ÇëÊÖ¶¯½â¾ö³åÍ»ºóÔÙÔËĞĞ¡£
+    pause
+    exit /b 1
+)
+
+echo [³É¹¦] ´úÂëºÏ²¢Íê³É£¬ÎŞ³åÍ»¡£
+echo.
+
+REM ====================================
+REM ½×¶Î 3: ÒÀÀµ¸üĞÂ (ÖÇÄÜ¼ì²é)
+REM ====================================
+:UPDATE_DEPS
+echo [½×¶Î 3/4] ¼ì²éÒÀÀµ±ä»¯
+echo ----------------------------------------
+
+set DEP_UPDATED=0
+
+REM Èç¹û¸Õ²Å½øĞĞÁËºÏ²¢£¬¼ì²é package.json ÊÇ·ñ±ä¶¯
+if defined BEFORE_MERGE (
+    if exist "package.json" (
+        git diff !BEFORE_MERGE! HEAD -- package.json >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo [·¢ÏÖ] package.json ·¢Éú±ä»¯£¬ÒÀÀµ¿ÉÄÜĞèÒª¸üĞÂ¡£
+            choice /C YN /T 10 /D Y /N /M "ÊÇ·ñ¸üĞÂ Node.js ÒÀÀµ? (Y/N, 10Ãë×Ô¶¯Ñ¡ÊÇ) "
+            if !errorlevel! equ 1 (
+                echo [Ö´ĞĞ] ÕıÔÚ°²×°ÒÀÀµ (npm install)...
+                call npm install
+                if !errorlevel! equ 0 (
+                    set DEP_UPDATED=1
+                    echo [³É¹¦] ÒÀÀµ°²×°Íê³É
+                ) else (
+                    echo [¾¯¸æ] ÒÀÀµ°²×°³öÏÖ´íÎó£¬ÇëÊÖ¶¯¼ì²é¡£
+                )
+            )
+        ) else (
+            echo [ÌáÊ¾] package.json Î´±ä»¯£¬Ìø¹ı°²×°¡£
+        )
+    )
 ) else (
-    echo [æˆåŠŸ] ä»£ç åˆå¹¶å®Œæˆï¼Œæ— å†²çªã€‚
+    echo [ÌáÊ¾] Î´½øĞĞ´úÂëºÏ²¢£¬Ìø¹ıÒÀÀµ¼ì²é¡£
 )
 
-REM ----------------------------------------
-REM 5. æ›´æ–°ä¾èµ– (npm install)
-REM ----------------------------------------
 echo.
-echo [3/3] æ£€æŸ¥ä¾èµ–åº“...
-if exist "package.json" (
-    echo æ­£åœ¨è¿è¡Œ npm install...
-    call npm install
-)
 
-REM ----------------------------------------
-REM 6. å¤‡ä»½åˆ°ä½ çš„ GitHub
-REM ----------------------------------------
-echo.
-echo [åŒæ­¥] æ­£åœ¨æ¨é€åˆ°ä½ çš„ GitHub...
-git push origin custom
+REM ====================================
+REM ½×¶Î 4: ÍÆËÍÖÁ GitHub
+REM ====================================
+echo [½×¶Î 4/4] ÍÆËÍÖÁ GitHub
+echo ----------------------------------------
+
+choice /C YN /N /M "ÊÇ·ñ½«×îĞÂ´úÂëÍÆËÍµ½ÄãµÄ GitHub? (Y/N) "
+if !errorlevel! equ 1 (
+    echo [Ö´ĞĞ] ÕıÔÚÍÆËÍ...
+    git push origin custom
+    if !errorlevel! equ 0 (
+        echo [³É¹¦] ÍÆËÍÍê³É
+    ) else (
+        echo [Ê§°Ü] ÍÆËÍÊ§°Ü£¬Çë¼ì²éÍøÂç»òÈ¨ÏŞ
+    )
+) else (
+    echo [ÌáÊ¾] ÒÑÌø¹ıÍÆËÍ¡£
+)
 
 echo.
 echo ========================================
-echo        æ›´æ–°å®Œæ¯•ï¼
+echo        ¸üĞÂÁ÷³Ì½áÊø
 echo ========================================
+echo [µ±Ç°°æ±¾]
+git log --oneline -1
+echo.
+
+:END
 pause
