@@ -31,7 +31,7 @@ import * as middleClickHandler from './renderer/middleClickHandler.js';
 // --- Pre-compiled Regular Expressions for Performance ---
 const TOOL_REGEX = /<<<\[TOOL_REQUEST\]>>>(.*?)<<<\[END_TOOL_REQUEST\]>>>/gs;
 const NOTE_REGEX = /<<<DailyNoteStart>>>(.*?)<<<DailyNoteEnd>>>/gs;
-const TOOL_RESULT_REGEX = /\[\[VCP调用结果信息汇总:(.*?)\]\]/gs;
+const TOOL_RESULT_REGEX = /\[\[VCP调用结果信息汇总:(.*?)VCP调用结果结束\]\]/gs;
 const BUTTON_CLICK_REGEX = /\[\[点击按钮:(.*?)\]\]/gs;
 const CANVAS_PLACEHOLDER_REGEX = /\{\{VCPChatCanvas\}\}/g;
 const STYLE_REGEX = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
@@ -39,6 +39,7 @@ const HTML_FENCE_CHECK_REGEX = /```\w*\n<!DOCTYPE html>/i;
 const MERMAID_CODE_REGEX = /<code.*?>\s*(flowchart|graph|mermaid)\s+([\s\S]*?)<\/code>/gi;
 const MERMAID_FENCE_REGEX = /```(mermaid|flowchart|graph)\n([\s\S]*?)```/g;
 const CODE_FENCE_REGEX = /```\w*([\s\S]*?)```/g;
+const START_END_MARKER_REGEX = /「始」([\s\S]*?)「末」/g;
 
 
 // --- Enhanced Rendering Styles (from UserScript) ---
@@ -586,6 +587,13 @@ function calculateDepthByTurns(messageId, history) {
 function preprocessFullContent(text, settings = {}, messageRole = 'assistant', depth = 0) {
     // 🟢 新增：第一层修复 - Markdown 图片语法修复
     text = fixEmoticonUrlsInMarkdown(text);
+
+    // 🔴 关键安全修复：将「始」和「末」之间的内容视为纯文本并进行 HTML 转义
+    // 这样可以防止工具调用参数中的 HTML 被执行。
+    text = text.replace(START_END_MARKER_REGEX, (match, content) => {
+        // 仅对内部内容进行转义，保留标记本身
+        return `「始」${escapeHtml(content)}「末」`;
+    });
     
     // 一次性处理 Mermaid（合并两种情况）
     text = text.replace(MERMAID_CODE_REGEX, (match, lang, code) => {
@@ -765,6 +773,11 @@ function clearChat() {
                 cleanupAnimationsInContent(contentDiv);
             }
         });
+        
+        // 🟢 清理所有注入的 scoped CSS
+        document.querySelectorAll('style[data-vcp-scope-id]').forEach(el => el.remove());
+        document.querySelectorAll('style[data-chat-scope-id]').forEach(el => el.remove());
+        
         mainRendererReferences.chatMessagesDiv.innerHTML = '';
     }
     mainRendererReferences.currentChatHistoryRef.set([]); // Clear the history array via its ref
@@ -1127,10 +1140,25 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true)
             textToRender = transformUserButtonClick(textToRender);
             textToRender = transformVCPChatCanvas(textToRender);
         } else if (message.role === 'assistant' && scopeId) {
-            // --- Scoped CSS: Extract, scope, and inject styles from AI content ---
-            const { processedContent: contentWithoutStyles } = processAndInjectScopedCss(textToRender, scopeId);
+            // --- 🟢 关键修复：先保护代码块，再提取样式 ---
+            // 这样可以避免代码块内的 <style> 被误当作真正的样式注入
+            const codeBlocksForStyleProtection = [];
+            const textWithProtectedBlocks = textToRender.replace(CODE_FENCE_REGEX, (match) => {
+                const placeholder = `__VCP_STYLE_PROTECT_${codeBlocksForStyleProtection.length}__`;
+                codeBlocksForStyleProtection.push(match);
+                return placeholder;
+            });
+            
+            // 现在只会匹配代码块外的 <style> 标签
+            const { processedContent: contentWithoutStyles } = processAndInjectScopedCss(textWithProtectedBlocks, scopeId);
+            
+            // 恢复代码块
             textToRender = contentWithoutStyles;
-            // --- END Scoped CSS ---
+            codeBlocksForStyleProtection.forEach((block, i) => {
+                const placeholder = `__VCP_STYLE_PROTECT_${i}__`;
+                textToRender = textToRender.replace(placeholder, block);
+            });
+            // --- 修复结束 ---
         }
         
         // --- 按“对话轮次”计算深度 ---
