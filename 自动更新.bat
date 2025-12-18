@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo VCPChat 前端更新脚本 (最终修正版)
+echo VCPChat 前端更新脚本 (Nova优化版)
 echo ========================================
 echo.
 
@@ -43,18 +43,32 @@ for /f %%i in ('git rev-list --count custom..upstream/main 2^>nul') do set NEW_C
 
 if "!NEW_COMMITS!"=="0" (
     echo [提示] 当前已是最新版本，无需更新。
-    REM 直接跳到依赖检查
     goto :CHECK_DEPS
 )
 
 echo [发现新版本] 有 !NEW_COMMITS! 个新提交。
 echo.
 
-REM 询问是否合并
-choice /C YN /T 10 /D Y /N /M "是否合并更新? (Y/N, 10秒默认Y) "
+REM ========== Nova优化：显示具体更新内容 ==========
+echo ----------------------------------------
+echo [更新详情] 新提交列表:
+echo ----------------------------------------
+git log custom..upstream/main --oneline --no-decorate
+echo.
+
+echo ----------------------------------------
+echo [更新详情] 改动的文件:
+echo ----------------------------------------
+git diff custom..upstream/main --stat
+echo.
+echo ----------------------------------------
+REM ========== 优化结束 ==========
+
+REM 询问是否合并（改为30秒，给用户更多时间看）
+choice /C YN /T 30 /D Y /N /M "是否合并更新? (Y/N, 30秒默认Y) "
 if errorlevel 2 goto :END
 
-REM 记录更新前的状态(用于检查依赖)
+REM 记录更新前的状态
 for /f "tokens=*" %%i in ('git rev-parse HEAD') do set BEFORE_MERGE=%%i
 
 REM ====================================
@@ -75,12 +89,14 @@ if !HAS_CONFLICT! equ 0 (
     echo.
     echo [严重警告] 检测到文件冲突！
     echo ----------------------------------------
+    echo [冲突文件列表]
+    git diff --name-only --diff-filter=U
+    echo ----------------------------------------
     echo [请手动处理]
-    echo 1. 在 VS Code 左侧查看冲突文件 (标记为 U)
-    echo 2. 选择保留你的版本 (Accept Current) 或 官方版本 (Accept Incoming)
+    echo 1. 保持 VCP 运行，询问 Nova 分析冲突
+    echo 2. 在 VS Code 终端执行 Nova 给出的命令
     echo 3. 处理完后运行: git add . 和 git commit -m "解决冲突"
     echo ----------------------------------------
-    echo 脚本已暂停，请处理完冲突后再运行。
     pause
     exit /b
 )
@@ -97,7 +113,6 @@ echo ----------------------------------------
 
 set NEED_INSTALL=0
 
-REM 只有当真的进行了合并操作，且 package.json 变了，才检查依赖
 if defined BEFORE_MERGE (
     if exist "package.json" (
         git diff !BEFORE_MERGE! HEAD -- package.json >nul 2>&1
@@ -109,7 +124,7 @@ if defined BEFORE_MERGE (
 )
 
 if !NEED_INSTALL! equ 1 (
-    choice /C YN /N /M "检测到依赖变更，是否安装依赖(npm install)? (Y/N) "
+    choice /C YN /N /M "检测到依赖变更，是否安装依赖? (Y/N) "
     if !errorlevel! equ 1 (
         echo [执行] 正在安装依赖...
         call npm install
