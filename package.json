@@ -28,7 +28,7 @@
   "dependencies": {
     "@3d-dice/dice-box": "^1.1.4",
     "animejs": "^4.0.2",
-    "axios": "^1.10.0",
+    "axios": "^1.13.2",
     "cheerio": "^1.1.2",
     "child_process": "^1.0.2",
     "chokidar": "^4.0.3",
@@ -55,6 +55,7 @@
     "naudiodon": "^2.3.6",
     "node-fetch": "^3.3.2",
     "node-global-key-listener": "^0.3.0",
+    "node-jieba": "^0.0.3",
     "node-pty": "^1.1.0-beta37",
     "node-schedule": "^2.1.1",
     "os": "^0.1.2",
