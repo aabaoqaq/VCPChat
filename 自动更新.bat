@@ -82,10 +82,13 @@ git merge upstream/main --no-edit >nul 2>&1
 set MERGE_EXIT=!errorlevel!
 
 REM 检查冲突
-git diff --name-only --diff-filter=U >nul 2>&1
-set HAS_CONFLICT=!errorlevel!
-
-if !HAS_CONFLICT! equ 0 (
+REM 1. 清空变量，并尝试捕获冲突文件名
+set "FOUND_CONFLICTS="
+for /f "tokens=*" %%i in ('git diff --name-only --diff-filter=U') do (
+    set "FOUND_CONFLICTS=%%i"
+)
+REM 2. 判断变量是否被赋值（如果没赋值，说明没有冲突文件）
+if defined FOUND_CONFLICTS (
     echo.
     echo [严重警告] 检测到文件冲突！
     echo ----------------------------------------
@@ -100,8 +103,7 @@ if !HAS_CONFLICT! equ 0 (
     pause
     exit /b
 )
-
-echo [成功] 合并完成。
+echo [成功] 合并完成，无冲突。
 echo.
 
 REM ====================================

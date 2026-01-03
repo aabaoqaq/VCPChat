@@ -1,0 +1,36 @@
+{
+  "manifestVersion": "1.0.0",
+  "name": "BladeGame",
+  "displayName": "华山论剑",
+  "description": "一个回合制武侠博弈游戏。你需要管理生命值(HP)和剑气(Energy)与用户对战。",
+  "author": "Ryan & Gemini & Nova",
+  "pluginType": "asynchronous",
+  "entryPoint": {
+    "type": "python",
+    "command": "python blade_controller.py"
+  },
+  "communication": {
+    "protocol": "stdio",
+    "timeout": 300000
+  },
+  "capabilities": {
+    "invocationCommands": [
+      {
+        "commandIdentifier": "StartGame",
+        "description": "开始一局新的华山论剑游戏。这将打开游戏窗口。\n参数:\n- maid (string, 必需): AI角色的名字。\n- difficulty (string, 可选): 难度描述。",
+        "example": "tool_name: BladeGame, command: StartGame, maid: 猫娘小克"
+      },
+      {
+        "commandIdentifier": "PlayTurn",
+        "description": "执行回合动作。这是一个【异步长耗时任务】。调用后系统返回动态占位符，用户在GUI完成操作后结果自动回调更新。\n\n【重要】调用成功后会收到占位符，请在回复中原样包含：{{VCP_ASYNC_RESULT::BladeGame::{request_id}}}\n\n参数:\n- action (string, 必需): AI动作。可选: Charge(蓄势+1气), Slash(斩击0气1伤), LightStep(轻霜踏雪1气2伤), PlumBlossom(寒梅逐鹿2气4伤+回血), Flash(回光无影3气9伤), Block(御剑格挡-4受击), Taiji(太极两仪防回光无影)。\n- reason (string, 可选): 战术思考。",
+        "example": "tool_name: BladeGame, command: PlayTurn, action: Charge"
+      }
+    ]
+  },
+  "webSocketPush": {
+    "enabled": true,
+    "messageType": "blade_game_turn_result",
+    "usePluginResultAsMessage": true,
+    "targetClientType": "VCPLog"
+  }
+}
