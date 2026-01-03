@@ -39,27 +39,29 @@ const HTML_FENCE_CHECK_REGEX = /```\w*\n<!DOCTYPE html>/i;
 const MERMAID_CODE_REGEX = /<code.*?>\s*(flowchart|graph|mermaid)\s+([\s\S]*?)<\/code>/gi;
 const MERMAID_FENCE_REGEX = /```(mermaid|flowchart|graph)\n([\s\S]*?)```/g;
 const CODE_FENCE_REGEX = /```\w*([\s\S]*?)```/g;
-const START_END_MARKER_REGEX = /「始」([\s\S]*?)「末」/g;
 
 
 // --- Enhanced Rendering Styles (from UserScript) ---
 function injectEnhancedStyles() {
    try {
+       // 检查是否已经通过 ID 或 href 引入了该样式表
        const existingStyleElement = document.getElementById('vcp-enhanced-ui-styles');
-       if (existingStyleElement) {
-           // Style element already exists, no need to recreate
-           return;
+       if (existingStyleElement) return;
+
+       const links = document.getElementsByTagName('link');
+       for (let i = 0; i < links.length; i++) {
+           if (links[i].href && links[i].href.includes('messageRenderer.css')) {
+               return;
+           }
        }
 
-       // Create link element to load external CSS
+       // 如果没有引入，则尝试从根路径引入（仅对根目录 HTML 有效）
        const linkElement = document.createElement('link');
        linkElement.id = 'vcp-enhanced-ui-styles';
        linkElement.rel = 'stylesheet';
        linkElement.type = 'text/css';
        linkElement.href = 'styles/messageRenderer.css';
        document.head.appendChild(linkElement);
-
-       // console.log('VCPSub Enhanced UI: External styles loaded.'); // Reduced logging
    } catch (error) {
        console.error('VCPSub Enhanced UI: Failed to load external styles:', error);
    }
@@ -73,13 +75,7 @@ function injectEnhancedStyles() {
  * @returns {string} The escaped text.
  */
 function escapeHtml(text) {
-    if (typeof text !== 'string') return '';
-    return text
-        .replace(/&/g, '&')
-        .replace(/</g, '<')
-        .replace(/>/g, '>')
-        .replace(/"/g, '"')
-        .replace(/'/g, '&#039;');
+    return contentProcessor.escapeHtml(text);
 }
 
 /**
@@ -461,59 +457,86 @@ function processAndInjectScopedCss(content, scopeId) {
  * @param {string} text The text content.
  * @returns {string} The processed text.
  */
+/**
+ * Wraps raw HTML documents in markdown code fences if they aren't already.
+ * 🟢 跳过「始」「末」标记内的 HTML，防止工具调用参数被错误封装
+ */
 function ensureHtmlFenced(text) {
     const doctypeTag = '<!DOCTYPE html>';
     const htmlCloseTag = '</html>';
     const lowerText = text.toLowerCase();
 
-    // If it's already in a proper html code block, do nothing. This is the fix.
-    // This regex now checks for any language specifier (or none) after the fences.
+    // 已在代码块中，不处理
     if (HTML_FENCE_CHECK_REGEX.test(text)) {
         return text;
     }
 
-    // Quick exit if no doctype is present.
+    // 快速检查：没有 doctype 直接返回
     if (!lowerText.includes(doctypeTag.toLowerCase())) {
         return text;
     }
 
+    // 🟢 构建「始」「末」保护区域
+    const protectedRanges = [];
+    const START_MARKER = '「始」';
+    const END_MARKER = '「末」';
+    let searchStart = 0;
+    
+    while (true) {
+        const startPos = text.indexOf(START_MARKER, searchStart);
+        if (startPos === -1) break;
+        
+        const endPos = text.indexOf(END_MARKER, startPos + START_MARKER.length);
+        if (endPos === -1) {
+            // 未闭合的「始」，保护到文本末尾（流式传输场景）
+            protectedRanges.push({ start: startPos, end: text.length });
+            break;
+        }
+        
+        protectedRanges.push({ start: startPos, end: endPos + END_MARKER.length });
+        searchStart = endPos + END_MARKER.length;
+    }
+    
+    // 🟢 检查位置是否在保护区域内
+    const isProtected = (index) => {
+        return protectedRanges.some(range => index >= range.start && index < range.end);
+    };
+
     let result = '';
     let lastIndex = 0;
+    
     while (true) {
         const startIndex = text.toLowerCase().indexOf(doctypeTag.toLowerCase(), lastIndex);
 
-        // Append the segment of text before the current HTML block.
-        const textSegment = text.substring(lastIndex, startIndex === -1 ? text.length : startIndex);
-        result += textSegment;
+        result += text.substring(lastIndex, startIndex === -1 ? text.length : startIndex);
 
-        if (startIndex === -1) {
-            break; // Exit loop if no more doctype markers are found.
-        }
+        if (startIndex === -1) break;
 
-        // Find the corresponding </html> tag.
         const endIndex = text.toLowerCase().indexOf(htmlCloseTag.toLowerCase(), startIndex + doctypeTag.length);
+        
         if (endIndex === -1) {
-            // Malformed HTML (no closing tag), append the rest of the string and stop.
             result += text.substring(startIndex);
             break;
         }
 
         const block = text.substring(startIndex, endIndex + htmlCloseTag.length);
-        
-        // Check if we are currently inside an open code block by counting fences in the processed result.
+
+        // 🔴 核心修复：如果在「始」「末」保护区内，直接添加不封装
+        if (isProtected(startIndex)) {
+            result += block;
+            lastIndex = endIndex + htmlCloseTag.length;
+            continue;
+        }
+
+        // 正常逻辑：检查是否已在代码块内
         const fencesInResult = (result.match(/```/g) || []).length;
 
         if (fencesInResult % 2 === 0) {
-            // Even number of fences means we are outside a code block.
-            // Wrap the HTML block in new fences.
             result += `\n\`\`\`html\n${block}\n\`\`\`\n`;
         } else {
-            // Odd number of fences means we are inside a code block.
-            // Append the HTML block as is.
             result += block;
         }
 
-        // Move past the current HTML block.
         lastIndex = endIndex + htmlCloseTag.length;
     }
 
@@ -590,10 +613,15 @@ function preprocessFullContent(text, settings = {}, messageRole = 'assistant', d
 
     // 🔴 关键安全修复：将「始」和「末」之间的内容视为纯文本并进行 HTML 转义
     // 这样可以防止工具调用参数中的 HTML 被执行。
-    text = text.replace(START_END_MARKER_REGEX, (match, content) => {
-        // 仅对内部内容进行转义，保留标记本身
-        return `「始」${escapeHtml(content)}「末」`;
-    });
+    // 注意：这里我们只处理不在工具请求块（<<<[TOOL_REQUEST]>>>）内的标记，
+    // 因为 transformSpecialBlocks 会处理工具块内的转义，避免双重转义。
+    // 但为了简单起见，我们先注释掉这一行，让 transformSpecialBlocks 统一处理，
+    // 或者确保 transformSpecialBlocks 能够处理未转义的原始文本。
+    // 实际上，processStartEndMarkers 在流式传输中非常重要。
+    // 我们将其移动到 transformSpecialBlocks 之后，或者只对非工具块内容应用。
+    
+    // 暂时保留，但我们需要意识到双重转义风险。
+    text = contentProcessor.processStartEndMarkers(text);
     
     // 一次性处理 Mermaid（合并两种情况）
     text = text.replace(MERMAID_CODE_REGEX, (match, lang, code) => {
@@ -920,6 +948,7 @@ function initializeMessageRenderer(refs) {
         ensureSpaceAfterTilde: contentProcessor.ensureSpaceAfterTilde,
         removeIndentationFromCodeBlockMarkers: contentProcessor.removeIndentationFromCodeBlockMarkers,
         deIndentMisinterpretedCodeBlocks: contentProcessor.deIndentMisinterpretedCodeBlocks, // 🟢 传递新函数
+        processStartEndMarkers: contentProcessor.processStartEndMarkers, // 🟢 传递安全处理函数
         ensureSeparatorBetweenImgAndCode: contentProcessor.ensureSeparatorBetweenImgAndCode,
         processAnimationsInContent: processAnimationsInContent,
         emoticonUrlFixer: emoticonUrlFixer, // 🟢 Pass emoticon fixer for live updates
