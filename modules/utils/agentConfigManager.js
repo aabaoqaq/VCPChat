@@ -25,16 +25,28 @@ class AgentConfigManager extends EventEmitter {
         const { lockFile } = this.getAgentPaths(agentId);
         const startTime = Date.now();
         
-        while (await fs.pathExists(lockFile)) {
-            if (Date.now() - startTime > timeout) {
-                console.warn(`Agent ${agentId} lock acquisition timeout, removing stale lock`);
-                await fs.remove(lockFile).catch(() => {});
-                break;
+        while (true) {
+            try {
+                // 使用 'wx' 标志进行原子性写入，如果文件已存在则会抛出错误
+                await fs.writeFile(lockFile, `${process.pid}-${Date.now()}`, { flag: 'wx' });
+                return; // 成功获取锁
+            } catch (error) {
+                if (error.code === 'EEXIST') {
+                    // 锁文件已存在，检查是否超时
+                    if (Date.now() - startTime > timeout) {
+                        console.warn(`Agent ${agentId} lock acquisition timeout, removing stale lock`);
+                        await fs.remove(lockFile).catch(() => {});
+                        // 继续循环尝试重新创建
+                    } else {
+                        // 等待一段时间后重试
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                } else {
+                    // 其他错误
+                    throw error;
+                }
             }
-            await new Promise(resolve => setTimeout(resolve, 100));
         }
-        
-        await fs.writeFile(lockFile, `${process.pid}-${Date.now()}`);
     }
 
     async releaseLock(agentId) {
@@ -66,7 +78,14 @@ class AgentConfigManager extends EventEmitter {
             return { ...config };
         } catch (error) {
             if (error.code === 'ENOENT') {
-                // 返回默认配置
+                // 检查是否是因为文件正在被移动（原子性替换过程中）
+                // 如果文件不存在，我们稍微等待一下再试一次，以防正处于 move 操作的瞬间
+                await new Promise(resolve => setTimeout(resolve, 50));
+                if (await fs.pathExists(configPath)) {
+                    return await this.readAgentConfig(agentId);
+                }
+
+                // 确实不存在，返回默认配置
                 const defaultConfig = {
                     name: agentId,
                     systemPrompt: `你是 ${agentId}。`,
@@ -87,24 +106,27 @@ class AgentConfigManager extends EventEmitter {
                 try {
                     const backupContent = await fs.readFile(backupPath, 'utf8');
                     const backupConfig = JSON.parse(backupContent);
-                    console.log(`Recovered agent ${agentId} config from backup`);
-                    return { ...backupConfig };
+
+                    // 验证备份数据是否有效且包含用户自定义数据（例如非默认的 systemPrompt 或 topics）
+                    const isNonDefault = backupConfig && (
+                        (Array.isArray(backupConfig.topics) && backupConfig.topics.length > 0 && backupConfig.topics[0].id !== 'default') ||
+                        (backupConfig.systemPrompt && !backupConfig.systemPrompt.includes(`你是 ${agentId}`)) ||
+                        backupConfig.model
+                    );
+
+                    if (isNonDefault) {
+                        console.log(`Recovered agent ${agentId} config from valid backup`);
+                        return { ...backupConfig };
+                    } else {
+                        console.warn(`Agent ${agentId} backup exists but appears to be default or empty, skipping recovery to prevent overwrite`);
+                    }
                 } catch (backupError) {
                     console.error(`Agent ${agentId} backup also corrupted:`, backupError);
                 }
             }
             
-            // 最后的手段：返回默认配置
-            const defaultConfig = {
-                name: agentId,
-                systemPrompt: `你是 ${agentId}。`,
-                model: 'gemini-2.5-flash-preview-05-20',
-                temperature: 0.7,
-                contextTokenLimit: 1000000,
-                maxOutputTokens: 60000,
-                topics: [{ id: "default", name: "主要对话", createdAt: Date.now() }]
-            };
-            return { ...defaultConfig };
+            // 如果主文件损坏且没有有效的备份，抛出错误以防止覆盖
+            throw new Error(`Agent config for ${agentId} corrupted and no valid backup found: ${error.message}`);
         }
     }
 

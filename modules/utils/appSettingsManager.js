@@ -38,6 +38,16 @@ class SettingsValidator {
             validated.networkNotesPaths = [];
             hasIssues = true;
         }
+
+        if (!Array.isArray(validated.combinedItemOrder)) {
+            validated.combinedItemOrder = [];
+            hasIssues = true;
+        }
+
+        if (!Array.isArray(validated.agentOrder)) {
+            validated.agentOrder = [];
+            hasIssues = true;
+        }
         
         return { validated, hasIssues };
     }
@@ -74,7 +84,9 @@ class SettingsManager extends EventEmitter {
             enableVcpToolInjection: false,
             lastOpenItemId: null,
             lastOpenItemType: null,
-            lastOpenTopicId: null
+            lastOpenTopicId: null,
+            combinedItemOrder: [],
+            agentOrder: []
         };
     }
 
@@ -124,15 +136,27 @@ class SettingsManager extends EventEmitter {
                 try {
                     const backupContent = await fs.readFile(backupPath, 'utf8');
                     const backupSettings = JSON.parse(backupContent);
-                    console.log('Recovered settings from backup');
-                    return { ...backupSettings };
+                    
+                    // 验证备份数据是否有效且包含用户自定义数据（例如 Agent 列表顺序或非默认用户名）
+                    const isNonDefault = backupSettings && (
+                        (Array.isArray(backupSettings.combinedItemOrder) && backupSettings.combinedItemOrder.length > 0) ||
+                        (backupSettings.userName && backupSettings.userName !== '用户') ||
+                        backupSettings.vcpServerUrl
+                    );
+
+                    if (isNonDefault) {
+                        console.log('Recovered settings from valid backup');
+                        return { ...backupSettings };
+                    } else {
+                        console.warn('Backup exists but appears to be default or empty, skipping recovery to prevent overwrite');
+                    }
                 } catch (backupError) {
                     console.error('Backup also corrupted:', backupError);
                 }
             }
             
-            // 最后的手段：返回默认设置
-            return { ...this.defaultSettings };
+            // 如果主文件损坏且没有有效的备份，抛出错误以防止覆盖
+            throw new Error(`Settings file corrupted and no valid backup found: ${error.message}`);
         }
     }
 

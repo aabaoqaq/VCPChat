@@ -12,8 +12,6 @@ require = function(id) {
     return result;
 };
 
-const sharp = require('sharp'); // 确保在文件顶部引入
-
 const { app, BrowserWindow, ipcMain, nativeTheme, globalShortcut, screen, clipboard, shell, dialog, protocol, Tray, Menu } = require('electron'); // Added screen, clipboard, and shell
 // selection-hook is now managed in assistantHandlers
 const path = require('path');
@@ -22,11 +20,8 @@ const fs = require('fs-extra'); // Using fs-extra for convenience
 const os = require('os');
 const { spawn } = require('child_process'); // For executing local python
 const { Worker } = require('worker_threads');
-const express = require('express'); // For the dice server
-const WebSocket = require('ws'); // For VCPLog notifications
 const fileManager = require('./modules/fileManager'); // Import the new file manager
 const groupChat = require('./Groupmodules/groupchat'); // Import the group chat module
-const DistributedServer = require('./VCPDistributedServer/VCPDistributedServer.js'); // Import the new distributed server
 const windowHandlers = require('./modules/ipc/windowHandlers'); // Import window IPC handlers
 const settingsHandlers = require('./modules/ipc/settingsHandlers'); // Import settings IPC handlers
 const fileDialogHandlers = require('./modules/ipc/fileDialogHandlers'); // Import file dialog handlers
@@ -44,10 +39,9 @@ const themeHandlers = require('./modules/ipc/themeHandlers'); // Import theme ha
 const emoticonHandlers = require('./modules/ipc/emoticonHandlers'); // Import emoticon handlers
 const forumHandlers = require('./modules/ipc/forumHandlers'); // Import forum handlers
 const memoHandlers = require('./modules/ipc/memoHandlers'); // Import memo handlers
-const musicMetadata = require('music-metadata');
-const speechRecognizer = require('./modules/speechRecognizer'); // Import the new speech recognizer
+// speechRecognizer is now lazy-loaded
 const canvasHandlers = require('./modules/ipc/canvasHandlers'); // Import canvas handlers
-const chokidar = require('chokidar'); // 引入 chokidar
+// chokidar is now lazy-loaded
  
  // --- File Watcher ---
 let historyWatcher = null;
@@ -62,6 +56,7 @@ const fileWatcher = {
       historyWatcher.close();
     }
     console.log(`[FileWatcher] Watching new file: ${filePath}`);
+    const chokidar = require('chokidar'); // Lazy load
     historyWatcher = chokidar.watch(filePath, {
         persistent: true,
         ignoreInitial: true,
@@ -235,6 +230,14 @@ function createWindow() {
 
     mainWindow.loadFile('main.html');
 
+    // 拦截主窗口内的直接导航（防止在应用内打开外部网页）
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+        if (url !== mainWindow.webContents.getURL() && (url.startsWith('http:') || url.startsWith('https:'))) {
+            event.preventDefault();
+            shell.openExternal(url);
+        }
+    });
+
     // 当主窗口关闭时，退出整个应用程序
     // 这将触发 'will-quit' 事件，用于执行所有清理操作
     mainWindow.on('close', (event) => {
@@ -372,6 +375,17 @@ if (!gotTheLock) {
 
 
   app.whenReady().then(async () => { // Make the function async
+    // 全局处理所有窗口的新窗口打开请求，确保外部链接在系统浏览器中打开
+    app.on('web-contents-created', (event, contents) => {
+        contents.setWindowOpenHandler(({ url }) => {
+            if (url.startsWith('http:') || url.startsWith('https:')) {
+                shell.openExternal(url);
+                return { action: 'deny' };
+            }
+            return { action: 'allow' };
+        });
+    });
+
     // Handle the emergency close request from the splash screen
     ipcMain.on('close-app', () => {
         console.log('[Main] Received close-app request from splash screen. Quitting.');
@@ -856,6 +870,7 @@ if (!gotTheLock) {
             const settings = await appSettingsManager.readSettings();
             if (settings.enableDistributedServer) {
                 console.log('[Main] Distributed server is enabled. Initializing...');
+                const DistributedServer = require('./VCPDistributedServer/VCPDistributedServer.js');
                 const config = {
                     mainServerUrl: settings.vcpLogUrl, // Assuming the distributed server connects to the same base URL as VCPLog
                     vcpKey: settings.vcpLogKey,
@@ -978,10 +993,11 @@ app.on('will-quit', () => {
     console.log('[Main] All global shortcuts unregistered.');
 
     // 3. Stop the speech recognizer
+    const speechRecognizer = require('./modules/speechRecognizer');
     speechRecognizer.shutdown(); // Use the new shutdown function to close the browser
 
     // 4. 关闭WebSocket连接
-    if (vcpLogWebSocket && vcpLogWebSocket.readyState === WebSocket.OPEN) {
+    if (vcpLogWebSocket) {
         vcpLogWebSocket.close();
     }
     if (vcpLogReconnectInterval) {
@@ -1032,12 +1048,13 @@ function formatTimestampForFilename(timestamp) {
 
 // VCPLog WebSocket Connection
 function connectVcpLog(wsUrl, wsKey) {
+    const WebSocket = require('ws'); // Lazy load
     if (!wsUrl || !wsKey) {
         if (mainWindow) mainWindow.webContents.send('vcp-log-status', { source: 'VCPLog', status: 'error', message: 'URL或KEY未配置。' });
         return;
     }
 
-    const fullWsUrl = `${wsUrl}/VCPlog/VCP_Key=${wsKey}`; 
+    const fullWsUrl = `${wsUrl}/VCPlog/VCP_Key=${wsKey}`;
     
     if (vcpLogWebSocket && (vcpLogWebSocket.readyState === WebSocket.OPEN || vcpLogWebSocket.readyState === WebSocket.CONNECTING)) {
         console.log('VCPLog WebSocket 已连接或正在连接。');
@@ -1099,8 +1116,8 @@ function connectVcpLog(wsUrl, wsKey) {
 }
 
 ipcMain.on('connect-vcplog', (event, { url, key }) => {
-    if (vcpLogWebSocket && vcpLogWebSocket.readyState === WebSocket.OPEN) {
-        vcpLogWebSocket.close(); 
+    if (vcpLogWebSocket) {
+        vcpLogWebSocket.close();
     }
     if (vcpLogReconnectInterval) {
         clearTimeout(vcpLogReconnectInterval);
@@ -1110,7 +1127,7 @@ ipcMain.on('connect-vcplog', (event, { url, key }) => {
 });
 
 ipcMain.on('disconnect-vcplog', () => {
-    if (vcpLogWebSocket && vcpLogWebSocket.readyState === WebSocket.OPEN) {
+    if (vcpLogWebSocket) {
         vcpLogWebSocket.close();
     }
     if (vcpLogReconnectInterval) {
@@ -1154,6 +1171,7 @@ ipcMain.on('open-voice-chat-window', (event, { agentId }) => {
     voiceChatWindow.on('closed', () => {
         openChildWindows = openChildWindows.filter(win => win !== voiceChatWindow);
         // Ensure speech recognition is stopped when the window is closed
+        const speechRecognizer = require('./modules/speechRecognizer');
         speechRecognizer.stop();
     });
 });
@@ -1163,6 +1181,7 @@ ipcMain.on('start-speech-recognition', (event) => {
     const voiceChatWindow = openChildWindows.find(win => win.webContents === event.sender);
     if (!voiceChatWindow) return;
 
+    const speechRecognizer = require('./modules/speechRecognizer');
     speechRecognizer.start((text) => {
         if (voiceChatWindow && !voiceChatWindow.isDestroyed()) {
             voiceChatWindow.webContents.send('speech-recognition-result', text);
@@ -1171,6 +1190,7 @@ ipcMain.on('start-speech-recognition', (event) => {
 });
 
 ipcMain.on('stop-speech-recognition', () => {
+    const speechRecognizer = require('./modules/speechRecognizer');
     speechRecognizer.stop();
 });
 

@@ -87,6 +87,7 @@
     white-space: pre-wrap !important; /* Restore: Allow wrapping but preserve whitespace */
     word-break: break-all !important; /* Restore: Break long strings */
     transition: all 0.4s ease-in-out; /* Add transition for smooth hover effect */
+    will-change: transform; /* 优化：工具气泡通常包含动画，提升为独立层 */
 }
 
 /* Animated Border for VCP ToolUse */
@@ -231,6 +232,15 @@
     font-size: 1em !important;
     white-space: normal !important; /* Allow text to wrap naturally */
     word-break: break-word !important;
+    will-change: transform; /* 优化：日记气泡提升为独立层 */
+}
+
+/* Remove extra spacing in diary content caused by markdown paragraphs */
+.diary-content > p:first-child {
+    margin-top: 0;
+}
+.diary-content > p:last-child {
+    margin-bottom: 0;
 }
 
 /* The decorative icon on the top left, changed to a quill */
@@ -299,7 +309,7 @@
 .diary-content {
     font-size: 0.95em;
     color: #4e342e; /* A dark, rich brown for readability */
-    white-space: pre-wrap;
+    white-space: normal; /* Changed from pre-wrap to normal to avoid extra line breaks from MD */
     word-break: break-word;
 }
 
@@ -515,19 +525,19 @@ body:not(.light-theme) { /* Or just .dark-theme if that's how your theme switchi
     --table-row-even-bg-color: transparent;
     --table-row-hover-bg-color: rgba(var(--rgb-secondary-bg-dark, 40, 40, 44), 0.4);
 
-    /* NEW: Tool Result Bubble Dark Theme */
-    --tool-result-bg: linear-gradient(145deg, #2b3a42, #3f5159);
-    --tool-result-border-color: rgba(255, 255, 255, 0.1);
-    --tool-result-text-color: #e0e0e0;
-    --tool-result-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    --tool-result-header-border-color: rgba(255, 255, 255, 0.15);
-    --tool-result-name-color: #81d4fa;
-    --tool-result-name-bg: rgba(129, 212, 250, 0.1);
-    --tool-result-item-key-color: #90a4ae;
-    --tool-result-item-value-color: #cfd8dc;
-    --tool-result-item-link-color: #82b1ff;
-    --tool-result-item-strong-color: #ffd54f;
-    --tool-result-footer-color: #b0bec5;
+    /* NEW: Tool Result Bubble Dark Theme - Modern Deep Dark */
+    --tool-result-bg: linear-gradient(145deg, #1c1c1e, #2c2c2e);
+    --tool-result-border-color: rgba(255, 255, 255, 0.08);
+    --tool-result-text-color: #f2f2f7;
+    --tool-result-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --tool-result-header-border-color: rgba(255, 255, 255, 0.1);
+    --tool-result-name-color: #64d2ff;
+    --tool-result-name-bg: rgba(100, 210, 255, 0.15);
+    --tool-result-item-key-color: #8e8e93;
+    --tool-result-item-value-color: #ebebf5;
+    --tool-result-item-link-color: #0a84ff;
+    --tool-result-item-strong-color: #ffd60a;
+    --tool-result-footer-color: #8e8e93;
     --vcp-canvas-bg: #2d3748;
     --vcp-canvas-text-color: #e2e8f0;
     --vcp-canvas-border-color: #4a5568;
@@ -637,6 +647,7 @@ body.light-theme {
     width: fit-content;
     max-width: 95%;
     transition: background 0.3s, color 0.3s, border-color 0.3s, box-shadow 0.3s; /* Add transition for smooth theme change */
+    will-change: transform; /* 优化：结果气泡提升为独立层 */
 }
 
 .vcp-tool-result-bubble::before {
@@ -757,7 +768,42 @@ body.light-theme .vcp-tool-result-status:containing("SUCCESS") {
 
 .vcp-tool-result-item-value {
     color: var(--tool-result-item-value-color);
-    word-break: break-all;
+    word-break: break-word;
+}
+
+/* Markdown support inside tool result bubble */
+.vcp-tool-result-item-value > p:first-child,
+.vcp-tool-result-footer > p:first-child {
+    margin-top: 0;
+}
+.vcp-tool-result-item-value > p:last-child,
+.vcp-tool-result-footer > p:last-child {
+    margin-bottom: 0;
+}
+
+.vcp-tool-result-bubble table {
+    margin: 0.5em 0;
+    border-color: var(--tool-result-border-color);
+    background-color: rgba(0, 0, 0, 0.05);
+    width: 100%;
+}
+
+body:not(.light-theme) .vcp-tool-result-bubble table {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.vcp-tool-result-bubble th,
+.vcp-tool-result-bubble td {
+    border-color: var(--tool-result-border-color);
+    padding: 6px 10px;
+}
+
+.vcp-tool-result-bubble th {
+    background-color: rgba(0, 0, 0, 0.1);
+}
+
+body:not(.light-theme) .vcp-tool-result-bubble th {
+    background-color: rgba(255, 255, 255, 0.1);
 }
 
 .vcp-tool-result-item-value a {
@@ -805,13 +851,29 @@ body.light-theme .vcp-tool-result-status:containing("SUCCESS") {
 .vcp-tool-result-collapsible-content {
     max-height: 0;
     opacity: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto; /* Enable vertical scrolling */
     transition: max-height 0.5s ease-in-out, opacity 0.4s ease-in-out, margin-top 0.5s ease-in-out;
     margin-top: 0;
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: var(--tool-result-item-key-color) transparent;
+}
+
+/* Custom scrollbar for Webkit */
+.vcp-tool-result-collapsible-content::-webkit-scrollbar {
+    width: 4px;
+}
+.vcp-tool-result-collapsible-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+.vcp-tool-result-collapsible-content::-webkit-scrollbar-thumb {
+    background-color: var(--tool-result-item-key-color);
+    border-radius: 10px;
+    opacity: 0.5;
 }
 
 .vcp-tool-result-bubble.expanded .vcp-tool-result-collapsible-content {
-    max-height: 1000px; /* Adjust as needed, should be large enough for content */
+    max-height: 500px; /* Set a reasonable max height for scrolling */
     opacity: 1;
     margin-top: 10px; /* Add space when expanded */
 }
@@ -941,16 +1003,10 @@ body:not(.light-theme) .mermaid-error {
 
 
 /* --- Stream Fade-in Animation --- */
-/* 新节点的滑入动画（保持原样） */
-.vcp-stream-element-fade-in {
-    animation: vcp-stream-fade-in 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* 新增：内容增长的脉冲动画 */
-.vcp-stream-content-pulse {
-    animation: vcp-content-pulse 0.3s ease-out;
-}
-
+/*
+ * 统一 AI 内容块流式渐入动画
+ * 使用 translateX(20px) 实现你记忆中的横向滑入感
+ */
 @keyframes vcp-stream-fade-in {
     from {
         opacity: 0;
@@ -967,17 +1023,20 @@ body:not(.light-theme) .mermaid-error {
         background-color: transparent;
     }
     50% {
-        background-color: rgba(59, 130, 246, 0.08); /* 轻微的蓝色高亮 */
+        background-color: rgba(59, 130, 246, 0.08);
     }
     100% {
         background-color: transparent;
     }
 }
 
-
-/* Class to apply the animation to newly added stream elements */
 .vcp-stream-element-fade-in {
-  animation: vcp-stream-fade-in 0.5s ease-out forwards;
+    animation: vcp-stream-fade-in 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards !important;
+    will-change: opacity, transform;
+}
+
+.vcp-stream-content-pulse {
+    animation: vcp-content-pulse 0.3s ease-out;
 }
 
 
@@ -1070,4 +1129,83 @@ body:not(.light-theme) .mermaid-error {
 /* Dark theme adjustments for the container */
 body:not(.light-theme) .vcp-html-preview-container {
     border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* --- VCP Thought Chain Bubble --- */
+.vcp-thought-chain-bubble {
+    display: block !important;
+    background: rgba(120, 120, 128, 0.05) !important;
+    border-radius: 12px !important;
+    border: 1px solid rgba(120, 120, 128, 0.2);
+    padding: 10px 15px !important;
+    margin: 10px 0 !important;
+    position: relative;
+    font-family: var(--font-family, sans-serif) !important;
+    font-size: 0.92em !important;
+    line-height: 1.6;
+    width: fit-content;
+    max-width: 98%;
+    transition: all 0.3s ease;
+}
+
+body.light-theme .vcp-thought-chain-bubble {
+    background: rgba(0, 0, 0, 0.03) !important;
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+.vcp-thought-chain-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.vcp-thought-chain-header:hover {
+    opacity: 1;
+}
+
+.vcp-thought-chain-icon {
+    font-size: 1.1em;
+    filter: grayscale(0.5);
+}
+
+.vcp-thought-chain-label {
+    font-weight: 600;
+    color: var(--primary-text);
+    font-size: 0.95em;
+}
+
+.vcp-thought-chain-collapsible-content {
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+    transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+}
+
+.vcp-thought-chain-bubble.expanded .vcp-thought-chain-collapsible-content {
+    max-height: 2000px;
+    opacity: 1;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed rgba(120, 120, 128, 0.2);
+}
+
+.vcp-thought-chain-body {
+    color: var(--primary-text);
+    font-style: italic;
+}
+
+.vcp-thought-chain-body pre {
+    background: rgba(0, 0, 0, 0.05);
+    padding: 8px;
+    border-radius: 6px;
+    font-style: normal;
+}
+
+/* Reuse the toggle icon from tool results */
+.vcp-thought-chain-bubble .vcp-result-toggle-icon {
+    margin-left: 10px;
 }
