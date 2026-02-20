@@ -1,4 +1,4 @@
-prefix=H:/VCP/vcpkg/installed/x64-windows-static
+prefix=F:/VCP/vcpkg/installed/x64-windows-static
 exec_prefix=${prefix}
 libdir=${prefix}/lib
 includedir=${prefix}/include
