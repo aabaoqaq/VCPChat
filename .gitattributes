@@ -1,0 +1,31 @@
+# ============================================
+# VCPChat .gitattributes — Nova Merge Protection
+# ============================================
+# 以下文件在合并上游更新时，始终保留本地（custom 分支）的版本
+# 使用 merge=ours 策略：当上游修改了这些文件时，合并不会覆盖本地版本
+
+# --- 自定义主题（保护主人的夜樱猫语主题） ---
+styles/themes.css merge=ours
+
+# --- RAG 观察器配置（保护本地功能增强） ---
+RAGmodules/rag-observer-config.js merge=ours
+
+# --- 本地配置文件 ---
+RAGmodules/config.env merge=ours
+Forummodules/config.env merge=ours
+VCPDistributedServer/Plugin/DeepMemo/config.env merge=ours
+VCPDistributedServer/Plugin/DistImageServer/config.env merge=ours
+VCPDistributedServer/Plugin/FileOperator/.env merge=ours
+VCPDistributedServer/Plugin/VCPEverything/.env merge=ours
+
+# --- package.json 本地依赖修改保护 ---
+# 注意：package.json 不设 merge=ours，因为上游新增依赖需要同步
+# 但 package-lock.json 可以在合并后重新生成
+package-lock.json merge=ours
+
+# --- 大文件处理 ---
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.exe binary

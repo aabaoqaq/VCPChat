@@ -1,18 +1,55 @@
-gitignore
+# ============================================
+# VCPChat .gitignore — Nova Optimized
+# ============================================
 
-# 不忽略 .gitignore 文件本身（这是Git的常见实践）
+# --- 不忽略 .gitignore 本身 ---
 !.gitignore
 
-AppData/
+# --- 系统文件 ---
+**/.DS_Store
+Thumbs.db
 
+# --- Node.js ---
 node_modules/
 
+# --- 环境配置文件（保护本地配置不被提交） ---
 .env
 !audio_engine/.env
+*.env.local
+*.backup
+config.env
 
+# 但不忽略 example 文件
+!*.env.example
+!config.env.example
+
+# --- Electron / 构建产物 ---
 /public/assets
+dist/
+out/
 
-**/.DS_Store
+# --- 用户数据 ---
+AppData/
 
-# Rust build artifacts
+# --- 壁纸（大文件，不应进入版本控制） ---
+assets/wallpaper/ComfyUI_*
+assets/wallpaper/cartethyia.png
+assets/wallpaper/fleurdelys.png
+assets/wallpaper/stargirl.png
+assets/wallpaper/wolfgirl.png
+assets/wallpaper/wallpaper-mountain-daybreak.jpg
+
+# --- 运行时产物 ---
+VCPDistributedServer/Plugin/PTYShellExecutor/reports/
+VCPDistributedServer/Plugin/BladeGame/game_state.json
+VCPDistributedServer/Plugin/BladeGame/备份/
+
+# --- Rust 构建产物 ---
 rust_audio_engine/target/
+
+# --- 本地更新脚本（不需要提交到上游） ---
+new自动更新.bat
+.gitignore.local
+
+# --- 音频引擎（本地编译产物） ---
+audio_engine/*.exe
