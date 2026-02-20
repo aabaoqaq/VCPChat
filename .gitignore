@@ -14,7 +14,6 @@ node_modules/
 
 # --- 环境配置文件（保护本地配置不被提交） ---
 .env
-!audio_engine/.env
 *.env.local
 *.backup
 config.env
@@ -51,5 +50,5 @@ rust_audio_engine/target/
 new自动更新.bat
 .gitignore.local
 
-# --- 音频引擎（本地编译产物） ---
-audio_engine/*.exe
+# --- 音频引擎（方案B：作为 custom 内置组件，继续追踪 exe；因此不在此忽略） ---
+# (no ignore rules for audio_engine/*.exe)

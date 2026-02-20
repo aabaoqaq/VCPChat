@@ -13,10 +13,6 @@ RAGmodules/rag-observer-config.js merge=ours
 # --- 本地配置文件 ---
 RAGmodules/config.env merge=ours
 Forummodules/config.env merge=ours
-VCPDistributedServer/Plugin/DeepMemo/config.env merge=ours
-VCPDistributedServer/Plugin/DistImageServer/config.env merge=ours
-VCPDistributedServer/Plugin/FileOperator/.env merge=ours
-VCPDistributedServer/Plugin/VCPEverything/.env merge=ours
 
 # --- package.json 本地依赖修改保护 ---
 # 注意：package.json 不设 merge=ours，因为上游新增依赖需要同步
