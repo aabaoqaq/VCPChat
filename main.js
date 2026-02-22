@@ -158,7 +158,8 @@ function startAudioEngine() {
         }
 
         // Use the Rust audio server binary (moved to audio_engine directory)
-        const rustBinaryPath = path.join(__dirname, 'audio_engine', 'audio_server.exe');
+        const binaryName = process.platform === 'win32' ? 'audio_server.exe' : 'audio_server';
+        const rustBinaryPath = path.join(__dirname, 'audio_engine', binaryName);
         console.log(`[Main] Starting Rust Audio Engine from: ${rustBinaryPath}`);
 
         // Check if the binary exists
@@ -601,6 +602,39 @@ if (!gotTheLock) {
         // IPC handler to provide cached models to the renderer process
         ipcMain.handle('get-cached-models', () => {
             return cachedModels;
+        });
+
+        // IPC handler to get hot models (top N most used models)
+        ipcMain.handle('get-hot-models', async () => {
+            try {
+                const modelUsageTracker = require('./modules/modelUsageTracker');
+                return await modelUsageTracker.getHotModels(10);
+            } catch (error) {
+                console.error('[Main] Failed to get hot models:', error);
+                return [];
+            }
+        });
+
+        // IPC handler to get favorite models
+        ipcMain.handle('get-favorite-models', async () => {
+            try {
+                const modelUsageTracker = require('./modules/modelUsageTracker');
+                return await modelUsageTracker.getFavoriteModels();
+            } catch (error) {
+                console.error('[Main] Failed to get favorite models:', error);
+                return [];
+            }
+        });
+
+        // IPC handler to toggle a model's favorite status
+        ipcMain.handle('toggle-favorite-model', async (event, modelId) => {
+            try {
+                const modelUsageTracker = require('./modules/modelUsageTracker');
+                return await modelUsageTracker.toggleFavoriteModel(modelId);
+            } catch (error) {
+                console.error('[Main] Failed to toggle favorite model:', error);
+                return { favorited: false };
+            }
         });
 
         // IPC handler to trigger a refresh of the model list
