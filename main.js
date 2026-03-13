@@ -170,8 +170,12 @@ function startAudioEngine() {
             return;
         }
 
-        const args = ['--port', '63789'];
-        audioEngineProcess = spawn(rustBinaryPath, args);
+        const args = ['--port', '63787'];
+        const audioEngineCwd = path.join(__dirname, 'audio_engine');
+        audioEngineProcess = spawn(rustBinaryPath, args, {
+            cwd: audioEngineCwd
+        });
+        console.log(`[Main] Audio Engine CWD set to: ${audioEngineCwd}`);
 
         const readyTimeout = setTimeout(() => {
             console.error('[Main] Audio Engine failed to start within 10 seconds.');
