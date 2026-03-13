@@ -41,7 +41,8 @@ const MERMAID_CODE_REGEX = /<code.*?>\s*(flowchart|graph|mermaid)\s+([\s\S]*?)<\
 const MERMAID_FENCE_REGEX = /```(mermaid|flowchart|graph)\n([\s\S]*?)```/g;
 const CODE_FENCE_REGEX = /```\w*([\s\S]*?)```/g;
 const THOUGHT_CHAIN_REGEX = /\[--- VCP元思考链(?::\s*"([^"]*)")?\s*---\]([\s\S]*?)\[--- 元思考链结束 ---\]/gs;
-const CONVENTIONAL_THOUGHT_REGEX = /<think>([\s\S]*?)<\/think>/gi;
+const CONVENTIONAL_THOUGHT_REGEX = /<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
+const ROLE_DIVIDER_REGEX = /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
 
 
 // --- Enhanced Rendering Styles (from UserScript) ---
@@ -517,6 +518,21 @@ function transformSpecialBlocks(text, codeBlockMap) {
     // Process Conventional Thought Chains (<think>...</think>)
     processed = processed.replace(CONVENTIONAL_THOUGHT_REGEX, (match, rawContent) => {
         return renderThoughtChain("思维链", rawContent);
+    });
+
+    // Process Role Dividers
+    processed = processed.replace(ROLE_DIVIDER_REGEX, (match, isEnd, role) => {
+        const isEndMarker = !!isEnd;
+        const roleLower = role.toLowerCase();
+
+        let label = '';
+        if (roleLower === 'system') label = 'System';
+        else if (roleLower === 'assistant') label = 'Assistant';
+        else if (roleLower === 'user') label = 'User';
+
+        const actionText = isEndMarker ? '结束' : '起始';
+
+        return `<div class="vcp-role-divider role-${roleLower} type-${isEndMarker ? 'end' : 'start'}"><span class="divider-text">角色分界: ${label} [${actionText}]</span></div>`;
     });
 
     return processed;
@@ -1592,10 +1608,10 @@ function appendStreamChunk(messageId, chunkData, context) {
     streamManager.appendStreamChunk(messageId, chunkData, context);
 }
 
-async function finalizeStreamedMessage(messageId, finishReason, context) {
+async function finalizeStreamedMessage(messageId, finishReason, context, finalPayload = null) {
     // 责任完全在 streamManager 内部，它应该使用自己拼接好的文本。
     // 我们现在只传递必要的元数据。
-    await streamManager.finalizeStreamedMessage(messageId, finishReason, context);
+    await streamManager.finalizeStreamedMessage(messageId, finishReason, context, finalPayload);
 
     // --- 核心修复：流式结束后，对完整内容重新应用前端正则 ---
     // 这是为了解决流式传输导致正则表达式（如元思考链）被分割而无法匹配的问题

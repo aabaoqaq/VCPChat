@@ -1,54 +1,31 @@
-# ============================================
-# VCPChat .gitignore — Nova Optimized
-# ============================================
+gitignore
 
-# --- 不忽略 .gitignore 本身 ---
+# 不忽略 .gitignore 文件本身（这是Git的常见实践）
 !.gitignore
 
-# --- 系统文件 ---
-**/.DS_Store
-Thumbs.db
-
-# --- Node.js ---
-node_modules/
-
-# --- 环境配置文件（保护本地配置不被提交） ---
-.env
-*.env.local
-*.backup
-config.env
-
-# 但不忽略 example 文件
-!*.env.example
-!config.env.example
-
-# --- Electron / 构建产物 ---
-/public/assets
-dist/
-out/
-
-# --- 用户数据 ---
 AppData/
 
-# --- 壁纸（大文件，不应进入版本控制） ---
-assets/wallpaper/ComfyUI_*
-assets/wallpaper/cartethyia.png
-assets/wallpaper/fleurdelys.png
-assets/wallpaper/stargirl.png
-assets/wallpaper/wolfgirl.png
-assets/wallpaper/wallpaper-mountain-daybreak.jpg
+node_modules/
 
-# --- 运行时产物 ---
-VCPDistributedServer/Plugin/PTYShellExecutor/reports/
-VCPDistributedServer/Plugin/BladeGame/game_state.json
-VCPDistributedServer/Plugin/BladeGame/备份/
+.env
+!audio_engine/.env
 
-# --- Rust 构建产物 ---
-rust_audio_engine/target/
+/public/assets
 
-# --- 本地更新脚本（不需要提交到上游） ---
-new自动更新.bat
-.gitignore.local
+**/.DS_Store
 
-# --- 音频引擎（方案B：作为 custom 内置组件，继续追踪 exe；因此不在此忽略） ---
-# (no ignore rules for audio_engine/*.exe)
+# Rust build artifacts
+**/target/
+**/Cargo.lock
+
+# Reports and logs
+**/reports/
+
+# 临时忽略的文件（本地修改，不提交）
+.npmrc
+modules/ipc/chatHandlers.js
+modules/itemListManager.js
+modules/settingsManager.js
+package-lock.json
+package.json
+styles/themes.css
