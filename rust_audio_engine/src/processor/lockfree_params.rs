@@ -18,58 +18,10 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-// Re-export atomic float if available, otherwise define fallback
-#[cfg(feature = "atomic_float")]
+// Use atomic_float crate directly — it's already a dependency in Cargo.toml.
+// Previously this used a cfg(feature) gate that was never registered, causing
+// a hand-rolled fallback to always be used instead (P1-1 fix).
 use atomic_float::AtomicF64;
-
-#[cfg(not(feature = "atomic_float"))]
-mod atomic_f64_fallback {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-
-    /// Fallback AtomicF64 using bits representation
-    #[derive(Debug)]
-    pub struct AtomicF64 {
-        bits: AtomicU64,
-    }
-
-    impl AtomicF64 {
-        pub fn new(value: f64) -> Self {
-            Self {
-                bits: AtomicU64::new(value.to_bits()),
-            }
-        }
-
-        pub fn load(&self, order: Ordering) -> f64 {
-            f64::from_bits(self.bits.load(order))
-        }
-
-        pub fn store(&self, value: f64, order: Ordering) {
-            self.bits.store(value.to_bits(), order);
-        }
-
-        pub fn compare_exchange_weak(
-            &self,
-            current: f64,
-            new: f64,
-            success: Ordering,
-            failure: Ordering,
-        ) -> Result<f64, f64> {
-            match self.bits.compare_exchange_weak(
-                current.to_bits(),
-                new.to_bits(),
-                success,
-                failure,
-            ) {
-                Ok(v) => Ok(f64::from_bits(v)),
-                Err(v) => Err(f64::from_bits(v)),
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "atomic_float"))]
-use atomic_f64_fallback::AtomicF64;
 
 use super::traits::LockfreeParams;
 
@@ -131,76 +83,87 @@ impl AtomicEqParams {
         }
     }
 
-    /// Write all parameters (main thread)
-    ///
-    /// Uses SeqLock to ensure atomic updates of the entire parameter set.
+    /// Write all EQ parameters atomically via SeqLock.
+    /// Caller must not call this concurrently (single-writer assumption).
     pub fn write(&self, gains: &[f64; EQ_BANDS], enabled: bool) {
-        // 1. Begin write: make version odd
-        let v = self.version.fetch_add(1, Ordering::Release);
-        debug_assert!(
-            v & 1 == 0,
-            "Concurrent write to EqParams detected! Previous write not completed."
-        );
+        // Begin write: version → odd
+        let v = self.version.fetch_add(1, Ordering::Relaxed);
+        debug_assert!(v & 1 == 0, "Concurrent write detected");
 
-        // 2. Write all parameters
+        // Write data with Relaxed — ordering enforced by fence below
         for (i, &g) in gains.iter().enumerate() {
             self.gains[i].store(g, Ordering::Relaxed);
         }
         self.enabled.store(enabled, Ordering::Relaxed);
 
-        // 3. End write: make version even
-        self.version.store(v + 2, Ordering::Release);
+        // Release fence: all Relaxed stores above are visible before version+2
+        std::sync::atomic::fence(Ordering::Release);
 
-        // 4. Mark dirty
+        // End write: version → even
+        self.version.store(v + 2, Ordering::Relaxed);
+
+        // Mark dirty for fast polling
         self.dirty.store(true, Ordering::Release);
     }
 
-    /// Read parameters with optimistic locking (audio thread)
-    ///
-    /// Returns a snapshot of all parameters. Will retry if a write
-    /// is in progress or completed during the read.
+    /// Read all EQ parameters via SeqLock optimistic read.
+    /// Safe to call from audio thread (wait-free in uncontended case).
     pub fn read(&self) -> EqParamsSnapshot {
         loop {
             let v1 = self.version.load(Ordering::Acquire);
-
-            // If version is odd, write is in progress - spin
             if v1 & 1 != 0 {
+                // Writer active — spin with hint
                 std::hint::spin_loop();
                 continue;
             }
 
-            // Read all parameters
+            // Read data with Relaxed
             let gains = std::array::from_fn(|i| self.gains[i].load(Ordering::Relaxed));
             let enabled = self.enabled.load(Ordering::Relaxed);
 
-            // Check if version changed
-            let v2 = self.version.load(Ordering::Acquire);
+            // Acquire fence: all Relaxed loads above complete before version check
+            std::sync::atomic::fence(Ordering::Acquire);
+
+            let v2 = self.version.load(Ordering::Relaxed);
             if v1 == v2 {
-                // Success - clear dirty flag
                 self.dirty.store(false, Ordering::Relaxed);
                 return EqParamsSnapshot { gains, enabled };
             }
-            // Version changed - retry
+            // Version changed during read — retry
         }
     }
 
-    /// Quick check if parameters have been updated
+    /// Quick check if parameters have been updated (read-only, does not clear)
     #[inline]
     pub fn has_update(&self) -> bool {
         self.dirty.load(Ordering::Acquire)
     }
 
-    /// Update a single band gain (main thread)
+    /// Update a single band gain (main thread).
+    /// MUST go through full SeqLock to preserve consistency with read().
     pub fn set_band_gain(&self, band: usize, gain_db: f64) {
         if band >= EQ_BANDS {
             return;
         }
-        let clamped = gain_db.clamp(-15.0, 15.0);
+        // Read current state, patch one band, write back via full SeqLock
+        let mut snap = self.read_raw_no_clear();
+        snap.gains[band] = gain_db.clamp(-15.0, 15.0);
+        self.write(&snap.gains, snap.enabled);
+    }
 
-        // For single band update, we don't need full SeqLock
-        // Just use atomic store with dirty flag
-        self.gains[band].store(clamped, Ordering::Release);
-        self.dirty.store(true, Ordering::Release);
+    /// Internal: read without clearing dirty flag
+    fn read_raw_no_clear(&self) -> EqParamsSnapshot {
+        loop {
+            let v1 = self.version.load(Ordering::Acquire);
+            if v1 & 1 != 0 { std::hint::spin_loop(); continue; }
+            let gains = std::array::from_fn(|i| self.gains[i].load(Ordering::Relaxed));
+            let enabled = self.enabled.load(Ordering::Relaxed);
+            std::sync::atomic::fence(Ordering::Acquire);
+            let v2 = self.version.load(Ordering::Relaxed);
+            if v1 == v2 {
+                return EqParamsSnapshot { gains, enabled };
+            }
+        }
     }
 
     /// Set enabled state (main thread)
@@ -244,7 +207,10 @@ impl LockfreeParams for AtomicEqParams {
 // Saturation Parameters (Simple Atomic)
 // ============================================================================
 
-/// Saturation type enumeration
+/// Saturation type enumeration for lock-free parameter passing.
+///
+/// M-4 fix: Provides bidirectional conversion with SaturationType
+/// from the saturation module, eliminating unsafe string-based mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum SaturationTypeValue {
@@ -261,6 +227,26 @@ impl From<u8> for SaturationTypeValue {
             1 => Self::Tube,
             2 => Self::Transistor,
             _ => Self::default(),
+        }
+    }
+}
+
+impl From<crate::processor::SaturationType> for SaturationTypeValue {
+    fn from(st: crate::processor::SaturationType) -> Self {
+        match st {
+            crate::processor::SaturationType::Tape => Self::Tape,
+            crate::processor::SaturationType::Tube => Self::Tube,
+            crate::processor::SaturationType::Transistor => Self::Transistor,
+        }
+    }
+}
+
+impl From<SaturationTypeValue> for crate::processor::SaturationType {
+    fn from(v: SaturationTypeValue) -> Self {
+        match v {
+            SaturationTypeValue::Tape => Self::Tape,
+            SaturationTypeValue::Tube => Self::Tube,
+            SaturationTypeValue::Transistor => Self::Transistor,
         }
     }
 }
@@ -407,10 +393,16 @@ impl AtomicSaturationParams {
         }
     }
 
-    /// Check for updates and clear flag
+    /// Check for updates (read-only, does not clear dirty flag)
     #[inline]
     pub fn has_update(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Clear dirty flag after reading params
+    #[inline]
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
     }
 
     /// Quick check if enabled
@@ -418,16 +410,12 @@ impl AtomicSaturationParams {
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
     }
-    
+
     /// Get settings as SaturationSettings (for backward compatibility)
     pub fn get_settings(&self) -> crate::processor::SaturationSettings {
+        let sat_type_value = SaturationTypeValue::from(self.sat_type.load(Ordering::Acquire));
         crate::processor::SaturationSettings {
-            sat_type: match self.sat_type.load(Ordering::Acquire) {
-                0 => crate::processor::SaturationType::Tape,
-                1 => crate::processor::SaturationType::Tube,
-                2 => crate::processor::SaturationType::Transistor,
-                _ => crate::processor::SaturationType::Tube,
-            },
+            sat_type: crate::processor::SaturationType::from(sat_type_value),
             drive: self.drive.load(Ordering::Acquire),
             threshold: self.threshold.load(Ordering::Acquire),
             mix: self.mix.load(Ordering::Acquire),
@@ -533,14 +521,20 @@ impl AtomicCrossfeedParams {
 
     #[inline]
     pub fn has_update(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Clear dirty flag after reading params
+    #[inline]
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
     }
 
     #[inline]
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
     }
-    
+
     /// Get settings as CrossfeedSettings (for backward compatibility)
     pub fn get_settings(&self) -> crate::processor::CrossfeedSettings {
         crate::processor::CrossfeedSettings {
@@ -643,7 +637,13 @@ impl AtomicPeakLimiterParams {
 
     #[inline]
     pub fn has_update(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Clear dirty flag after reading params
+    #[inline]
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
     }
 
     #[inline]
@@ -729,7 +729,13 @@ impl AtomicVolumeParams {
 
     #[inline]
     pub fn has_update(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Clear dirty flag after reading params
+    #[inline]
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
     }
 }
 
@@ -825,7 +831,13 @@ impl AtomicNoiseShaperParams {
 
     #[inline]
     pub fn has_update(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Clear dirty flag after reading params
+    #[inline]
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
     }
 
     #[inline]
@@ -928,14 +940,20 @@ impl AtomicDynamicLoudnessParams {
 
     #[inline]
     pub fn has_update(&self) -> bool {
-        self.dirty.swap(false, Ordering::AcqRel)
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Clear dirty flag after reading params
+    #[inline]
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
     }
 
     #[inline]
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
     }
-    
+
     /// Get strength (0.0 - 1.0)
     #[inline]
     pub fn strength(&self) -> f64 {

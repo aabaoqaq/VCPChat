@@ -8,12 +8,12 @@ let activeStreamingMessageId = null; // Track the currently active streaming mes
 const elementContentLengthCache = new Map(); // 跟踪每个元素的内容长度
 
 // --- VCPdesktop 流式推送状态 ---
-const desktopPushStates = new Map(); // messageId -> { active, widgetId, buffer, tagBuffer, created, pushTimer, lastPushedLength, timeoutTimer, validated }
+const desktopPushStates = new Map(); // messageId -> { active, widgetId, buffer, tagBuffer, created, pushTimer, lastPushedLength, lastTokenTime, validated }
 const DESKTOP_PUSH_START_TAG = '<<<[DESKTOP_PUSH]>>>';
 const DESKTOP_PUSH_END_TAG = '<<<[DESKTOP_PUSH_END]>>>';
 const DESKTOP_PUSH_THROTTLE_MS = 100; // 每100ms推送一次累积内容到桌面画布
 const DESKTOP_PUSH_TIMEOUT_MS = 150000; // 150秒超时：未闭合的推送块自动finalize
-const DESKTOP_PUSH_VALID_PREFIXES = ['<!doctype', '<div', '<section', '<article', '<main', '<header', '<nav', '<aside', '<canvas', '<svg', 'target:'];
+const DESKTOP_PUSH_VALID_PREFIXES = ['<!doctype', '<div', '<section', '<article', '<main', '<header', '<nav', '<aside', '<canvas', '<svg', '<style', 'target:'];
 let desktopWindowAvailable = false; // 缓存桌面窗口是否可用，避免每个token都发IPC
 
 // --- DOM Cache ---
@@ -787,11 +787,17 @@ function intelligentChunkSplit(text) {
 /**
  * VCPdesktop 流式推送处理器
  * 在token流中拦截 <<<[DESKTOP_PUSH]>>> 语法，实时转发到桌面画布
+ *
+ * 注意：工具调用结果块 ([[VCP调用结果信息汇总:...VCP调用结果结束]]) 内部的
+ * DESKTOP_PUSH 语法不需要在这里保护，因为：
+ * 1. 工具调用结果是后端一次性拼接到消息中的，不是AI逐token流式生成的
+ * 2. preprocessFullContent 中已经通过 toolResultMap 保护了工具结果块
+ * 3. 在逐字符级别做工具结果块检测会与推送标签检测产生字符竞争bug
  */
 function processDesktopPushToken(messageId, textToAppend) {
     let state = desktopPushStates.get(messageId);
     if (!state) {
-        state = { active: false, widgetId: null, buffer: '', tagBuffer: '', created: false, validated: false, pushTimer: null, lastPushedLength: 0, timeoutTimer: null };
+        state = { active: false, widgetId: null, buffer: '', tagBuffer: '', created: false, validated: false, pushTimer: null, lastPushedLength: 0, lastTokenTime: null, backtickContext: false };
         desktopPushStates.set(messageId, state);
     }
 
@@ -809,8 +815,20 @@ function processDesktopPushToken(messageId, textToAppend) {
 
             if (DESKTOP_PUSH_START_TAG.startsWith(state.tagBuffer)) {
                 if (state.tagBuffer === DESKTOP_PUSH_START_TAG) {
+                    // 🟢 加固：检查开始标签前是否有反引号包裹
+                    // 检查 outputText 末尾是否刚输出了一个反引号
+                    const precedingChar = outputText.length > 0 ? outputText[outputText.length - 1] : '';
+                    if (precedingChar === '`') {
+                        // 被反引号包裹，不视为推送标签，直接输出原文
+                        state.backtickContext = true;
+                        outputText += state.tagBuffer;
+                        state.tagBuffer = '';
+                        continue;
+                    }
+                    
                     // 匹配到开始标签，进入active状态但延迟创建挂件
                     state.active = true;
+                    state.backtickContext = false;
                     state.widgetId = 'dw-' + Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
                     state.buffer = '';
                     state.created = false;
@@ -830,7 +848,6 @@ function processDesktopPushToken(messageId, textToAppend) {
                 if (state.tagBuffer === DESKTOP_PUSH_END_TAG) {
                     // 结束标签
                     if (state.pushTimer) { clearInterval(state.pushTimer); state.pushTimer = null; }
-                    if (state.timeoutTimer) { clearTimeout(state.timeoutTimer); state.timeoutTimer = null; }
 
                     if (canPush && state.created) {
                         if (state.isReplaceMode) {
@@ -867,6 +884,10 @@ function processDesktopPushToken(messageId, textToAppend) {
                 state.buffer += state.tagBuffer;
                 state.tagBuffer = '';
 
+                // 🟢 性能优化：仅更新时间戳，超时检查由 pushTimer interval 负责
+                // 这样每个 token 只需一次赋值操作，避免频繁 clearTimeout/setTimeout
+                state.lastTokenTime = Date.now();
+
                 // 二级验证：buffer积累到一定量后检查前缀是否合法
                 // 只在前30个有效字符内做验证，避免延迟过大
                 if (!state.validated && state.buffer.trim().length >= 5) {
@@ -895,31 +916,48 @@ function processDesktopPushToken(messageId, textToAppend) {
                                 });
                                 state.created = true;
                                 
-                                // 启动定时推送
+                                // 启动定时推送 + 内置空闲超时检测
+                                state.lastTokenTime = Date.now();
                                 state.pushTimer = setInterval(() => {
+                                    // 推送新内容
                                     if (state.buffer.length > state.lastPushedLength) {
                                         electronAPI.desktopPush({
                                             action: 'append', widgetId: state.widgetId, content: state.buffer
                                         });
                                         state.lastPushedLength = state.buffer.length;
                                     }
+                                    
+                                    // 🟢 空闲超时检测：如果距离上次token超过150秒，自动finalize
+                                    // 不需要单独的setTimeout，复用已有的interval，零额外开销
+                                    if (state.lastTokenTime && (Date.now() - state.lastTokenTime > DESKTOP_PUSH_TIMEOUT_MS)) {
+                                        console.warn(`[DesktopPush] Widget ${state.widgetId} idle timeout (no new tokens for ${DESKTOP_PUSH_TIMEOUT_MS / 1000}s), auto-finalizing`);
+                                        clearInterval(state.pushTimer); state.pushTimer = null;
+                                        if (state.created && !state.isReplaceMode && electronAPI?.desktopPush) {
+                                            electronAPI.desktopPush({ action: 'append', widgetId: state.widgetId, content: state.buffer });
+                                            electronAPI.desktopPush({ action: 'finalize', widgetId: state.widgetId });
+                                        }
+                                        state.active = false; state.tagBuffer = ''; state.buffer = '';
+                                        state.widgetId = null; state.created = false; state.validated = false;
+                                        state.isReplaceMode = false; state.lastPushedLength = 0; state.lastTokenTime = null;
+                                    }
                                 }, DESKTOP_PUSH_THROTTLE_MS);
                             }
                         }
 
-                        // 超时机制（创建模式和替换模式都需要）
-                        if (canPush) {
-                            state.timeoutTimer = setTimeout(() => {
-                                console.warn(`[DesktopPush] Widget ${state.widgetId} timed out, auto-finalizing`);
-                                if (state.pushTimer) { clearInterval(state.pushTimer); state.pushTimer = null; }
-                                if (state.created && !state.isReplaceMode && electronAPI?.desktopPush) {
-                                    electronAPI.desktopPush({ action: 'append', widgetId: state.widgetId, content: state.buffer });
-                                    electronAPI.desktopPush({ action: 'finalize', widgetId: state.widgetId });
+                        // 🟢 替换模式也需要空闲超时保护
+                        // 替换模式没有 pushTimer，需要单独的超时机制
+                        if (state.isReplaceMode && canPush) {
+                            state.lastTokenTime = Date.now();
+                            // 替换模式用一个轻量级的检查 interval
+                            state.pushTimer = setInterval(() => {
+                                if (state.lastTokenTime && (Date.now() - state.lastTokenTime > DESKTOP_PUSH_TIMEOUT_MS)) {
+                                    console.warn(`[DesktopPush] Replace mode idle timeout, discarding`);
+                                    clearInterval(state.pushTimer); state.pushTimer = null;
+                                    state.active = false; state.tagBuffer = ''; state.buffer = '';
+                                    state.widgetId = null; state.created = false; state.validated = false;
+                                    state.isReplaceMode = false; state.lastPushedLength = 0; state.lastTokenTime = null;
                                 }
-                                state.active = false; state.tagBuffer = ''; state.buffer = '';
-                                state.widgetId = null; state.created = false; state.validated = false;
-                                state.isReplaceMode = false; state.lastPushedLength = 0; state.timeoutTimer = null;
-                            }, DESKTOP_PUSH_TIMEOUT_MS);
+                            }, 5000); // 替换模式检查频率低一些：5秒一次
                         }
                     } else if (state.buffer.trim().length >= 30) {
                         // 验证失败：30字符内未匹配到合法前缀，丢弃该推送块

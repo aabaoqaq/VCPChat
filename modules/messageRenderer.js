@@ -30,7 +30,7 @@ import * as middleClickHandler from './renderer/middleClickHandler.js';
 
 
 // --- Pre-compiled Regular Expressions for Performance ---
-const TOOL_REGEX = /<<<\[TOOL_REQUEST\]>>>(.*?)<<<\[END_TOOL_REQUEST\]>>>/gs;
+const TOOL_REGEX = /(?<!`)<<<\[TOOL_REQUEST\]>>>(.*?)<<<\[END_TOOL_REQUEST\]>>>(?!`)/gs;
 const NOTE_REGEX = /<<<DailyNoteStart>>>(.*?)<<<DailyNoteEnd>>>/gs;
 const TOOL_RESULT_REGEX = /\[\[VCP调用结果信息汇总:(.*?)VCP调用结果结束\]\]/gs;
 const BUTTON_CLICK_REGEX = /\[\[点击按钮:(.*?)\]\]/gs;
@@ -43,8 +43,8 @@ const CODE_FENCE_REGEX = /```\w*([\s\S]*?)```/g;
 const THOUGHT_CHAIN_REGEX = /\[--- VCP元思考链(?::\s*"([^"]*)")?\s*---\]([\s\S]*?)\[--- 元思考链结束 ---\]/gs;
 const CONVENTIONAL_THOUGHT_REGEX = /<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
 const ROLE_DIVIDER_REGEX = /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
-const DESKTOP_PUSH_REGEX = /<<<\[DESKTOP_PUSH\]>>>([\s\S]*?)<<<\[DESKTOP_PUSH_END\]>>>/gs;
-const DESKTOP_PUSH_PARTIAL_REGEX = /<<<\[DESKTOP_PUSH\]>>>([\s\S]*)$/s; // 流式传输中未闭合的情况
+const DESKTOP_PUSH_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*?)<<<\[DESKTOP_PUSH_END\]>>>(?!`)/gs;
+const DESKTOP_PUSH_PARTIAL_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*)$/s; // 流式传输中未闭合的情况
 
 
 // --- Enhanced Rendering Styles (from UserScript) ---
@@ -759,15 +759,6 @@ function preprocessFullContent(text, settings = {}, messageRole = 'assistant', d
     text = fixEmoticonUrlsInMarkdown(text);
 
     // 🔴 关键安全修复：将「始」和「末」之间的内容视为纯文本并进行 HTML 转义
-    // 这样可以防止工具调用参数中的 HTML 被执行。
-    // 注意：这里我们只处理不在工具请求块（<<<[TOOL_REQUEST]>>>）内的标记，
-    // 因为 transformSpecialBlocks 会处理工具块内的转义，避免双重转义。
-    // 但为了简单起见，我们先注释掉这一行，让 transformSpecialBlocks 统一处理，
-    // 或者确保 transformSpecialBlocks 能够处理未转义的原始文本。
-    // 实际上，processStartEndMarkers 在流式传输中非常重要。
-    // 我们将其移动到 transformSpecialBlocks 之后，或者只对非工具块内容应用。
-
-    // 暂时保留，但我们需要意识到双重转义风险。
     text = contentProcessor.processStartEndMarkers(text);
 
     // 一次性处理 Mermaid（合并两种情况）
@@ -784,9 +775,28 @@ function preprocessFullContent(text, settings = {}, messageRole = 'assistant', d
     });
 
     // 🔴 关键修复：在提取代码块之前先处理缩进
-    // 这样 deIndentMisinterpretedCodeBlocks 才能正确识别代码围栏
     text = contentProcessor.deIndentMisinterpretedCodeBlocks(text);
     text = deIndentHtml(text);
+
+    // 🟢 保护工具调用结果块：在代码块保护和 DESKTOP_PUSH/TOOL_REQUEST 处理之前
+    // 工具调用结果块内部可能包含 <<<[TOOL_REQUEST]>>> 或 <<<[DESKTOP_PUSH]>>> 语法
+    // 这些是文档内容的一部分，不应被当作真正的工具调用或桌面推送来渲染
+    let toolResultMap = null;
+    let toolResultPlaceholderId = 0;
+    TOOL_RESULT_REGEX.lastIndex = 0;
+    const hasToolResults = TOOL_RESULT_REGEX.test(text);
+    TOOL_RESULT_REGEX.lastIndex = 0; // 重置，后续 transformSpecialBlocks 还要用
+
+    if (hasToolResults) {
+        toolResultMap = new Map();
+        text = text.replace(TOOL_RESULT_REGEX, (match) => {
+            const placeholder = `__VCP_TOOL_RESULT_PLACEHOLDER_${toolResultPlaceholderId}__`;
+            toolResultMap.set(placeholder, match);
+            toolResultPlaceholderId++;
+            return placeholder;
+        });
+        TOOL_RESULT_REGEX.lastIndex = 0; // 重置
+    }
 
     // 保护代码块（优化：只在需要时创建 Map）
     let codeBlockMap = null;
@@ -809,7 +819,7 @@ function preprocessFullContent(text, settings = {}, messageRole = 'assistant', d
     text = contentProcessor.deIndentToolRequestBlocks(text);
 
     // 🔴 VCPdesktop 转义封印：在代码块保护之后执行（代码块内的语法不会被误匹配）
-    // 但在 transformSpecialBlocks 和 ensureHtmlFenced 之前（防止推送块内HTML泄露）
+    // 工具调用结果块已被保护，内部的推送语法不会被误匹配
     DESKTOP_PUSH_REGEX.lastIndex = 0;
     DESKTOP_PUSH_PARTIAL_REGEX.lastIndex = 0;
     text = text.replace(DESKTOP_PUSH_REGEX, (match, rawContent) => {
@@ -825,15 +835,28 @@ function preprocessFullContent(text, settings = {}, messageRole = 'assistant', d
     });
     text = text.replace(DESKTOP_PUSH_PARTIAL_REGEX, (match, partialContent) => {
         const content = partialContent.trim();
-        const escapedPreview = escapeHtml(content.length > 80 ? content.substring(0, 80) + '...' : content);
+        // 🟢 改进：显示末尾内容而非开头，让用户看到推送进度
+        const lines = content.split('\n');
+        const totalLines = lines.length;
+        const tailLines = lines.slice(-3).join('\n'); // 显示最后3行
+        const escapedPreview = escapeHtml(tailLines.length > 120 ? tailLines.substring(tailLines.length - 120) : tailLines);
+        const lineCountInfo = totalLines > 3 ? `(${totalLines} 行)` : '';
         return `<div class="vcp-desktop-push-placeholder constructing">` +
             `<div class="vcp-desktop-push-header">` +
             `<span class="vcp-desktop-push-icon">🖥️</span>` +
-            `<span class="vcp-desktop-push-label">正在向桌面推送<span class="thinking-indicator-dots">...</span></span>` +
+            `<span class="vcp-desktop-push-label">正在向桌面推送 ${escapeHtml(lineCountInfo)}<span class="thinking-indicator-dots">...</span></span>` +
             `</div>` +
             `<div class="vcp-desktop-push-preview"><pre>${escapedPreview}</pre></div>` +
             `</div>`;
     });
+
+    // 🟢 恢复工具调用结果块（在 DESKTOP_PUSH 处理之后、transformSpecialBlocks 之前）
+    // 这样 transformSpecialBlocks 中的 TOOL_RESULT_REGEX 可以正常匹配并渲染结果气泡
+    if (toolResultMap) {
+        for (const [placeholder, block] of toolResultMap.entries()) {
+            text = text.replace(placeholder, () => block);
+        }
+    }
 
     text = transformSpecialBlocks(text, codeBlockMap);
     text = ensureHtmlFenced(text);
@@ -1364,12 +1387,29 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true)
             textToRender = transformUserButtonClick(textToRender);
             textToRender = transformVCPChatCanvas(textToRender);
         } else if (message.role === 'assistant' && scopeId) {
-            // --- 🟢 关键修复：先保护代码块和桌面推送块，再提取样式 ---
-            // 这样可以避免代码块和推送块内的 <style> 被误当作真正的样式注入
+            // --- 🟢 关键修复：先保护所有可能包含 <style> 的特殊区域，再提取样式 ---
+            // 这样可以避免代码块、推送块、工具请求块和「始」「末」标记内的 <style> 被误当作真正的样式注入
             const protectedBlocks = [];
             
+            // 🔴 保护工具请求块（<<<[TOOL_REQUEST]>>>...<<<[END_TOOL_REQUEST]>>>）
+            // 工具请求参数中可能包含完整的HTML文档（如壁纸HTML），其中的 <style> 不应被注入
+            // 使用与 TOOL_REGEX 相同的加固版正则（排除反引号包裹）
+            let textWithProtectedBlocks = textToRender.replace(TOOL_REGEX, (match) => {
+                const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
+                protectedBlocks.push(match);
+                return placeholder;
+            });
+            
+            // 🔴 保护「始」「末」标记区域
+            // 这些标记内的内容是工具参数，可能包含任意HTML（含<style>），不应被提取
+            textWithProtectedBlocks = textWithProtectedBlocks.replace(/「始」[\s\S]*?(「末」|$)/g, (match) => {
+                const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
+                protectedBlocks.push(match);
+                return placeholder;
+            });
+            
             // 保护桌面推送块（必须在代码块之前，因为推送块可能包含代码围栏）
-            let textWithProtectedBlocks = textToRender.replace(DESKTOP_PUSH_REGEX, (match) => {
+            textWithProtectedBlocks = textWithProtectedBlocks.replace(DESKTOP_PUSH_REGEX, (match) => {
                 const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
                 protectedBlocks.push(match);
                 return placeholder;

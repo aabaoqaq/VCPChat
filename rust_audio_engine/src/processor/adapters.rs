@@ -132,6 +132,7 @@ impl SaturationProcessor {
     fn sync_params(&mut self) {
         if self.params.has_update() {
             self.cached = self.params.read();
+            self.params.clear_dirty();
 
             // Apply to saturation processor
             self.saturation.set_drive(self.cached.drive);
@@ -143,12 +144,8 @@ impl SaturationProcessor {
             self.saturation.set_highpass_cutoff(self.cached.highpass_cutoff);
             self.saturation.set_enabled(self.cached.enabled);
 
-            // Map sat_type
-            match self.cached.sat_type {
-                SaturationTypeValue::Tape => self.saturation.set_type(super::saturation::SaturationType::Tape),
-                SaturationTypeValue::Tube => self.saturation.set_type(super::saturation::SaturationType::Tube),
-                SaturationTypeValue::Transistor => self.saturation.set_type(super::saturation::SaturationType::Transistor),
-            }
+            // M-4 fix: use From trait for type-safe conversion
+            self.saturation.set_type(super::saturation::SaturationType::from(self.cached.sat_type));
         }
     }
 }
@@ -222,6 +219,7 @@ impl CrossfeedProcessor {
     fn sync_params(&mut self) {
         if self.params.has_update() {
             self.cached = self.params.read();
+            self.params.clear_dirty();
             self.crossfeed.set_mix(self.cached.mix);
             self.crossfeed.set_enabled(self.cached.enabled);
             // Cutoff change requires sample rate update
@@ -305,15 +303,15 @@ impl PeakLimiterProcessor {
     fn sync_params(&mut self) {
         if self.params.has_update() {
             self.cached = self.params.read();
+            self.params.clear_dirty();
 
-            // Recreate limiter with new params
-            self.limiter = PeakLimiter::new(
-                self.channels,
-                self.sample_rate,
-                self.cached.threshold_db,
-                10.0,  // lookahead ms
-                self.cached.release_ms,
-            );
+            // In-place update — NO PeakLimiter::new(), NO heap allocation
+            self.limiter.set_threshold(self.cached.threshold_db);
+            self.limiter.set_release_ms(self.cached.release_ms);
+            // If enabled state changed, limiter reset may be needed
+            if self.cached.enabled != self.limiter.is_enabled() {
+                self.limiter.reset();
+            }
         }
     }
 }
@@ -386,26 +384,48 @@ impl ChannelAware for PeakLimiterProcessor {
 }
 
 // ============================================================================
-// Volume Adapter
+// Volume Adapter (P1-3 fix: anti-zipper smoothing)
 // ============================================================================
 
-/// Simple volume processor
+/// Volume processor with exponential smoothing to prevent zipper noise.
+///
+/// Uses ~5ms smoothing time constant to ensure click-free volume transitions.
+/// Previous implementation directly multiplied buffer by target volume,
+/// causing audible clicks/zips on rapid volume changes.
 pub struct VolumeProcessor {
     params: Arc<AtomicVolumeParams>,
     cached: VolumeParamsSnapshot,
+    /// Current smoothed volume (exponentially approaches target)
+    current_volume: f64,
+    /// Smoothing coefficient per sample (calculated from sample rate)
+    smoothing_coeff: f64,
+    /// Sample rate for smoothing calculation
+    sample_rate: f64,
 }
 
 impl VolumeProcessor {
     pub fn new(params: Arc<AtomicVolumeParams>) -> Self {
+        let smoothing_coeff = Self::calc_smoothing_coeff(44100.0);
         Self {
             params,
             cached: VolumeParamsSnapshot::default(),
+            current_volume: 1.0,
+            smoothing_coeff,
+            sample_rate: 44100.0,
         }
+    }
+
+    /// Calculate smoothing coefficient for ~5ms time constant
+    fn calc_smoothing_coeff(sample_rate: f64) -> f64 {
+        let smoothing_time_ms = 5.0;
+        let smoothing_samples = (smoothing_time_ms / 1000.0) * sample_rate;
+        (-1.0 / smoothing_samples).exp()
     }
 
     fn sync_params(&mut self) {
         if self.params.has_update() {
             self.cached = self.params.read();
+            self.params.clear_dirty();
         }
     }
 }
@@ -415,21 +435,31 @@ impl AudioProcessor for VolumeProcessor {
         "Volume"
     }
 
-    fn process(&mut self, buffer: &mut [f64], _channels: usize) -> ProcessResult {
+    fn process(&mut self, buffer: &mut [f64], channels: usize) -> ProcessResult {
         self.sync_params();
 
         // Volume is always "enabled" - just applies gain
         // Check for mute
         if self.cached.muted {
-            buffer.fill(0.0);
+            // Smooth fade to zero to avoid click
+            for sample in buffer.iter_mut() {
+                self.current_volume *= self.smoothing_coeff;
+                *sample *= self.current_volume;
+            }
             return ProcessResult::Ok;
         }
 
-        // Apply volume
-        let vol = self.cached.volume;
-        if (vol - 1.0).abs() > 1e-10 {
-            for sample in buffer.iter_mut() {
-                *sample *= vol;
+        // Apply volume with anti-zipper smoothing
+        let target = self.cached.volume;
+        let coeff = self.smoothing_coeff;
+        let one_minus_coeff = 1.0 - coeff;
+        let frames = buffer.len() / channels;
+
+        for frame in 0..frames {
+            // Exponential smoothing: current = current + (target - current) * (1 - coeff)
+            self.current_volume += (target - self.current_volume) * one_minus_coeff;
+            for ch in 0..channels {
+                buffer[frame * channels + ch] *= self.current_volume;
             }
         }
 
@@ -437,7 +467,7 @@ impl AudioProcessor for VolumeProcessor {
     }
 
     fn reset(&mut self) {
-        // No state to reset
+        self.current_volume = self.cached.volume;
     }
 
     fn is_enabled(&self) -> bool {
@@ -446,6 +476,13 @@ impl AudioProcessor for VolumeProcessor {
 
     fn set_enabled(&mut self, _enabled: bool) {
         // Use set_muted instead
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        if (self.sample_rate - sample_rate).abs() > 1.0 {
+            self.sample_rate = sample_rate;
+            self.smoothing_coeff = Self::calc_smoothing_coeff(sample_rate);
+        }
     }
 }
 
@@ -485,6 +522,7 @@ impl NoiseShaperProcessor {
     fn sync_params(&mut self) {
         if self.params.has_update() {
             self.cached = self.params.read();
+            self.params.clear_dirty();
             self.noise_shaper.set_enabled(self.cached.enabled);
             self.noise_shaper.set_bits(self.cached.bits);
             self.noise_shaper.set_curve(self.cached.curve);
@@ -549,6 +587,7 @@ pub struct DynamicLoudnessProcessor {
     telemetry: Arc<AtomicDynamicLoudnessTelemetry>,
     cached: DynamicLoudnessParamsSnapshot,
     sample_rate: u32,
+    channels: usize,
 }
 
 impl DynamicLoudnessProcessor {
@@ -564,12 +603,14 @@ impl DynamicLoudnessProcessor {
             telemetry,
             cached: DynamicLoudnessParamsSnapshot::default(),
             sample_rate,
+            channels,
         }
     }
 
     fn sync_params(&mut self) {
         if self.params.has_update() {
             self.cached = self.params.read();
+            self.params.clear_dirty();
             self.dynamic_loudness.set_volume(self.cached.volume);
             self.dynamic_loudness.set_strength(self.cached.strength);
         }
@@ -621,7 +662,7 @@ impl SampleRateAware for DynamicLoudnessProcessor {
 
     fn set_sample_rate(&mut self, sr: f64) {
         self.sample_rate = sr as u32;
-        self.dynamic_loudness = DynamicLoudness::new(2, self.sample_rate as f64);
+        self.dynamic_loudness = DynamicLoudness::new(self.channels, self.sample_rate as f64);
     }
 }
 

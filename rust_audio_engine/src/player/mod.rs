@@ -10,7 +10,9 @@ mod audio_thread;
 mod spectrum;
 
 // Re-exports
-pub use state::{AudioCommand, PlayerState, SharedState, AudioDeviceInfo};
+pub use state::{AudioCommand, PlayerState, AtomicPlayerState, SharedState, AudioDeviceInfo,
+    EVENT_LOAD_COMPLETE, EVENT_LOAD_ERROR, EVENT_TRACK_CHANGED,
+    EVENT_PLAYBACK_ENDED, EVENT_NEEDS_PRELOAD, EVENT_NEEDS_PRELOAD_RESET};
 pub use gapless::GaplessManager;
 pub use callback::{LockfreeDspContext, audio_callback_lockfree, normalize_channels};
 
@@ -182,7 +184,7 @@ impl AudioPlayer {
                 lf_dl,
                 lf_dl_telemetry,
                 lf_loudness_state,
-                24,  // noise shaper bits
+                config.output_bits.unwrap_or(24),  // M-1 fix: read from config instead of hardcoded 24
                 spectrum_tx,
                 phase_response,
                 target_lufs,
@@ -324,7 +326,7 @@ impl AudioPlayer {
         config: &AppConfig,
         device_id: Option<usize>,
         shared_state: &Arc<SharedState>,
-        loudness_enabled: bool,
+        _loudness_enabled: bool,
     ) -> Result<state::LoadResult, String> {
         use crate::decoder::StreamingDecoder;
         use crate::processor::StreamingResampler;
@@ -404,7 +406,7 @@ impl AudioPlayer {
                     let total_frames = cached_samples.len() / channels;
                     log::info!("Loaded from cache: {} frames", total_frames);
                     return Ok(state::LoadResult {
-                        samples: cached_samples.clone(),
+                        samples: cached_samples,  // Move instead of clone — avoids copying hundreds of MB
                         sample_rate: final_target_sr,
                         channels,
                         total_frames: total_frames as u64,
@@ -545,7 +547,7 @@ impl AudioPlayer {
     }
 
     pub fn get_state(&self) -> PlayerState {
-        *self.shared_state.state.read()
+        self.shared_state.state.load()
     }
 
     pub fn shared_state(&self) -> Arc<SharedState> {
@@ -734,17 +736,8 @@ impl AudioPlayer {
         saturation.set_highpass_mode(snapshot.highpass_mode);
         saturation.set_highpass_cutoff(snapshot.highpass_cutoff);
         saturation.set_enabled(snapshot.enabled);
-        match snapshot.sat_type {
-            crate::processor::SaturationTypeValue::Tape => {
-                saturation.set_type(crate::processor::SaturationType::Tape)
-            }
-            crate::processor::SaturationTypeValue::Tube => {
-                saturation.set_type(crate::processor::SaturationType::Tube)
-            }
-            crate::processor::SaturationTypeValue::Transistor => {
-                saturation.set_type(crate::processor::SaturationType::Transistor)
-            }
-        }
+        // M-4 fix: use From trait for type-safe conversion
+        saturation.set_type(crate::processor::SaturationType::from(snapshot.sat_type));
         Arc::new(Mutex::new(saturation))
     }
 
