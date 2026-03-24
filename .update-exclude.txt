@@ -1,0 +1,25 @@
+# VCPChat 更新保护清单
+# 说明：
+# 1. “核心配置”和“用户数据”会在更新后自动恢复/保留本地版本。
+# 2. “运行时产物”不会参与恢复，仅用于避免误判为需要保留的个人内容。
+# 3. 如需新增路径，请添加到对应分区，每行一个相对路径。
+
+# === 核心配置 ===
+.update-exclude.txt
+.gitignore.local
+自动更新.bat
+tools/update/VCPChatUpdate.ps1
+Forummodules/config.env
+RAGmodules/config.env
+VCPDistributedServer/Plugin/DeepMemo/config.env
+VCPDistributedServer/Plugin/DeepMemo/config.env.local
+VCPDistributedServer/Plugin/DistImageServer/config.env
+
+# === 用户数据 ===
+assets/wallpaper/
+
+# === 运行时产物 ===
+AppData/
+VCPDistributedServer/Plugin/PTYShellExecutor/reports/
+VCPDistributedServer/Plugin/BladeGame/game_state.json
+VCPDistributedServer/Plugin/BladeGame/备份/
