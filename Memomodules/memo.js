@@ -10,7 +10,7 @@ let forumConfig = null;
 let currentFolder = '';
 let allMemos = [];
 let currentMemo = null; // 当前正在编辑的日记 { folder, file, content }
-let searchScope = 'folder'; // 'folder' or 'global'
+let searchScope = 'folder'; // 'folder', 'global', or 'semantic'
 let searchAbortController = null; // 搜索请求控制器
 let isBatchMode = false;
 let selectedMemos = new Set(); // Set of "folder:::name" strings
@@ -108,6 +108,17 @@ async function initApp() {
 }
 
 function setupEventListeners() {
+    // 文件夹搜索
+    const folderSearchInput = document.getElementById('folder-search-input');
+    folderSearchInput.oninput = () => {
+        const term = folderSearchInput.value.trim().toLowerCase();
+        const items = folderListEl.querySelectorAll('.folder-item');
+        items.forEach(item => {
+            const name = item.querySelector('span')?.textContent?.toLowerCase() || '';
+            item.style.display = name.includes(term) ? '' : 'none';
+        });
+    };
+
     // 刷新文件夹
     const refreshBtn = document.getElementById('refresh-folders-btn');
     refreshBtn.onclick = async () => {
@@ -125,22 +136,28 @@ function setupEventListeners() {
     // 搜索范围切换
     const searchScopeBtn = document.getElementById('search-scope-btn');
     searchScopeBtn.onclick = () => {
-        searchScope = searchScope === 'folder' ? 'global' : 'folder';
-        
-        // 更新按钮 UI
-        searchScopeBtn.classList.toggle('active', searchScope === 'global');
-        searchScopeBtn.title = searchScope === 'folder' ? '当前范围：文件夹内' : '当前范围：全局搜索';
-        
-        // 切换图标
-        if (searchScope === 'global') {
-            searchScopeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
+        if (searchScope === 'folder') {
+            searchScope = 'global';
+        } else if (searchScope === 'global') {
+            searchScope = 'semantic';
         } else {
-            searchScopeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+            searchScope = 'folder';
         }
         
-        // 如果搜索框有内容，立即重新搜索
-        const term = searchInput.value.trim();
-        if (term) searchMemos(term);
+        // 更新按钮 UI
+        searchScopeBtn.classList.toggle('active', searchScope !== 'folder');
+        
+        // 切换图标和标题
+        if (searchScope === 'global') {
+            searchScopeBtn.title = '当前范围：全局搜索';
+            searchScopeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-primary)" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
+        } else if (searchScope === 'semantic') {
+            searchScopeBtn.title = '当前范围：语义级全局检索';
+            searchScopeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .52 8.125A5.002 5.002 0 0 0 14 18a5 5 0 0 0 5-5A3 3 0 0 0 12 5Z"/><path d="M12 18v-2a2 2 0 0 0-2-2H8"/><path d="M16 8a2 2 0 0 0-2 2v2"/></svg>`;
+        } else {
+            searchScopeBtn.title = '当前范围：文件夹内';
+            searchScopeBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+        }
     };
 
     // 搜索 (增加防抖保护)
@@ -899,6 +916,12 @@ async function searchMemos(term) {
 
     try {
         memoGridEl.innerHTML = '<div style="padding: 20px;">搜索中...</div>';
+
+        if (searchScope === 'semantic') {
+            await performSemanticSearch(term);
+            return;
+        }
+
         let url = `/search?term=${encodeURIComponent(term)}`;
 
         // 根据搜索范围决定是否添加 folder 参数
@@ -929,6 +952,137 @@ async function searchMemos(term) {
             // 这里不直接置空，因为可能已经有新的搜索发起了
         }
     }
+}
+
+async function performSemanticSearch(query) {
+    // 捕获当前的 abort controller 本地引用，防止竞态
+    const myAbortController = searchAbortController;
+    try {
+        const settings = await window.electronAPI.loadSettings();
+        if (!settings?.vcpApiKey) throw new Error('API Key 未配置');
+
+        // 竞态检查：如果在 await 期间有新搜索发起，放弃当前搜索
+        if (myAbortController.signal.aborted || myAbortController !== searchAbortController) return;
+
+        let serverBaseUrl = settings.vcpServerUrl.replace(/\/v1\/chat\/completions\/?$/, '');
+        if (!serverBaseUrl.endsWith('/')) serverBaseUrl += '/';
+
+        const toolRequest = `<<<[TOOL_REQUEST]>>>
+maid:「始」Memo「末」,
+tool_name:「始」LightMemo「末」,
+query:「始」${query}「末」,
+k:「始」10「末」,
+tag_boost:「始」0.6「末」,
+search_all_knowledge_bases:「始」true「末」
+<<<[END_TOOL_REQUEST]>>>`;
+
+        const res = await fetch(`${serverBaseUrl}v1/human/tool`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/plain;charset=UTF-8',
+                'Authorization': `Bearer ${settings.vcpApiKey}`
+            },
+            body: toolRequest,
+            signal: myAbortController.signal
+        });
+
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        
+        // 竞态检查：fetch 返回后确认当前搜索未被取代
+        if (myAbortController !== searchAbortController) return;
+
+        const data = await res.json();
+        console.log('[Memo] Semantic search result:', data);
+        
+        // 竞态检查：解析完成后再次确认
+        if (myAbortController !== searchAbortController) return;
+
+        let output = '';
+        if (data.original_plugin_output) {
+            output = data.original_plugin_output;
+        } else if (data.status === 'success' && data.content) {
+            try {
+                const content = JSON.parse(data.content);
+                output = content.original_plugin_output || data.content;
+            } catch (e) {
+                output = data.content;
+            }
+        } else if (typeof data === 'string') {
+            output = data;
+        }
+
+        if (output) {
+            processSemanticSearchResults(output, query);
+        } else {
+            memoGridEl.innerHTML = '<div style="padding: 20px; color: var(--text-secondary);">语义搜索未返回结果</div>';
+        }
+    } catch (err) {
+        if (err.name === 'AbortError') return;
+        // 竞态检查：如果已被新搜索取代，静默退出
+        if (myAbortController !== searchAbortController) return;
+        console.error('[Memo] Semantic search error:', err);
+        memoGridEl.innerHTML = `<div style="padding: 20px; color: var(--danger-color);">语义搜索失败: ${err.message}</div>`;
+    }
+}
+
+function processSemanticSearchResults(output, query) {
+    // 解析 LightMemo 输出并转换为 memo 列表格式
+    const results = [];
+    const sections = output.split('--- (来源:');
+    
+    sections.forEach(section => {
+        if (!section.trim()) return;
+        
+        const pathMatch = section.match(/\[路径: file:\/\/\/(.*?)\]/);
+        if (pathMatch) {
+            const fullPath = pathMatch[1];
+            const parts = fullPath.split('/');
+            const fileName = parts.pop();
+            const folderName = parts.join('/');
+            
+            // 提取预览内容：跳过元信息行（来源标题、路径、TagMemo、Tag），取实际日记内容
+            const lines = section.split('\n');
+            let contentLines = [];
+            let skippedFirstLine = false;
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                // split('--- (来源:') 后第一个非空行一定是来源信息（如 "公共的日常, 相关性: 86.6%(混合))"）
+                if (!skippedFirstLine) {
+                    skippedFirstLine = true;
+                    continue;
+                }
+                // 跳过路径行
+                if (line.startsWith('[路径:')) continue;
+                // 跳过 TagMemo 增强行
+                if (line.startsWith('[TagMemo')) continue;
+                // 跳过 Tag 行（兼容半角/全角冒号）
+                if (/^Tag[：:]/.test(line)) continue;
+                // 跳过分隔线
+                if (line.startsWith('---')) continue;
+                
+                // 剩下的就是实际日记内容
+                contentLines.push(line);
+                // 收集足够的预览内容就停止
+                if (contentLines.join(' ').length >= 100) break;
+            }
+            
+            const preview = contentLines.join(' ').substring(0, 150);
+
+            results.push({
+                name: fileName,
+                folderName: folderName,
+                preview: preview || '语义匹配片段...',
+                lastModified: new Date().getTime(), // 语义搜索不一定返回准确时间，暂用当前
+                path: fullPath
+            });
+        }
+    });
+
+    allMemos = results;
+    currentFolderNameEl.textContent = `语义级全局检索: ${query}`;
+    renderMemos(results);
 }
 
 async function handleBatchDelete() {
