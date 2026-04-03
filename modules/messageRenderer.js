@@ -1041,7 +1041,12 @@ function removeMessageById(messageId, saveHistory = false) {
         // --- NEW: Cleanup dynamic content before removing from DOM ---
         const contentDiv = item.querySelector('.md-content');
         if (contentDiv) {
+            contentProcessor.cleanupPreviewsInContent(contentDiv);
             cleanupAnimationsInContent(contentDiv);
+        }
+        // [Pretext集成] 释放高度缓存，防止内存泄漏
+        if (window.pretextBridge && window.pretextBridge.evict) {
+            window.pretextBridge.evict(messageId);
         }
         // 停止观察消息可见性
         visibilityOptimizer.unobserveMessage(item);
@@ -1076,6 +1081,7 @@ function clearChat() {
         allMessages.forEach(item => {
             const contentDiv = item.querySelector('.md-content');
             if (contentDiv) {
+                contentProcessor.cleanupPreviewsInContent(contentDiv);
                 cleanupAnimationsInContent(contentDiv);
             }
             visibilityOptimizer.unobserveMessage(item);
@@ -1084,6 +1090,11 @@ function clearChat() {
         // 🟢 清理所有注入的 scoped CSS
         document.querySelectorAll('style[data-vcp-scope-id]').forEach(el => el.remove());
         document.querySelectorAll('style[data-chat-scope-id]').forEach(el => el.remove());
+
+        // [Pretext集成] 清空所有高度缓存
+        if (window.pretextBridge && window.pretextBridge.clearAll) {
+            window.pretextBridge.clearAll();
+        }
 
         mainRendererReferences.chatMessagesDiv.innerHTML = '';
     }
@@ -1557,6 +1568,16 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true)
         // Synchronously set the base HTML content
         const finalHtml = rawHtml;
         contentDiv.innerHTML = finalHtml;
+
+        // [Pretext集成] 异步填充文本高度缓存，不阻塞渲染
+        if (window.pretextBridge && window.pretextBridge.isReady()) {
+            try {
+                const containerWidth = chatMessagesDiv ? chatMessagesDiv.clientWidth : 800;
+                window.pretextBridge.estimateHeight(message.id, textToRender, 'body', containerWidth);
+            } catch (e) {
+                // Pretext 失败不影响正常渲染
+            }
+        }
 
         // Define the post-processing logic as a function.
         // This allows us to control WHEN it gets executed.

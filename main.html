@@ -1241,7 +1241,7 @@
 
                                 <div class="form-group" id="middleClickQuickActionContainer"
                                     style="display: none; margin-bottom: 20px;">
-                                    <label for="middleClickQuickAction">中键快速执行功能:</label>
+                                    <label for="middleClickQuickAction" style="color: var(--highlight-text);">中键快速执行功能:</label>
                                     <select id="middleClickQuickAction" name="middleClickQuickAction">
                                         <option value="">请选择要快速执行的功能</option>
                                         <option value="edit">编辑消息</option>
@@ -1253,7 +1253,7 @@
                                         <option value="regenerate">重新回复</option>
                                         <option value="delete">删除消息</option>
                                     </select>
-                                    <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                                    <small style="color: var(--text-on-accent); margin-top: 5px; display: block;">
                                         提示：启用后，中键按下消息气泡，1 秒内松开将快速执行选中的右键菜单功能
                                     </small>
                                 </div>
@@ -1623,6 +1623,10 @@
     </template>
 
     <div id="floating-toast-notifications-container"></div>
+
+    <!-- Pretext 文本布局引擎（纯算术高度预算，避免 reflow） -->
+    <script src="modules/renderer/pretext.bundle.js"></script>
+    <script src="modules/renderer/pretext-bridge.js"></script>
 
     <script src="modules/topicSummarizer.js"></script>
     <script src="modules/notificationRenderer.js"></script>

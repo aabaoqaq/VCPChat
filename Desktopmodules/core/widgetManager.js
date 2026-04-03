@@ -268,6 +268,23 @@
         // 如果挂件标记了固定尺寸，跳过自动调整
         if (widgetData.fixedSize) return;
 
+        const widgetId = widgetData.element?.dataset?.widgetId;
+        const currentWidth = parseInt(widgetData.element.style.width) || CONSTANTS.AUTO_RESIZE_MIN_W;
+
+        // --- Pretext 优化：如果内容是纯文本或简单 Markdown，尝试预计算高度 ---
+        if (window.pretextBridge && window.pretextBridge.isReady() && widgetData.contentBuffer && widgetId) {
+            // 简单剥离 HTML 标签获取文本内容进行快速估算
+            const plainText = widgetData.contentBuffer.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+            if (plainText.length > 0) {
+                const estimatedHeight = window.pretextBridge.estimateHeight(widgetId, plainText, 'widget', currentWidth);
+                // 如果估算高度与当前高度差异极小，可以考虑跳过后续的 DOM 测量以节省性能
+                const currentHeight = parseInt(widgetData.element.style.height) || 0;
+                if (Math.abs(estimatedHeight - currentHeight) < 2 && !widgetData.isConstructing) {
+                    return; // 高度几乎没变且不是初次构造，跳过昂贵的 DOM 测量
+                }
+            }
+        }
+
         requestAnimationFrame(() => {
             const container = widgetData.contentContainer;
             if (!container) return;
@@ -381,8 +398,21 @@
                         _widgetData = _realWindow.VCPDesktop.state.widgets.get('${widgetId}');
                     }
 
+                    var _perf = _realWindow.VCPDesktop ? _realWindow.VCPDesktop.performanceManager : null;
+                    var _wrap = function(fn) {
+                        return function() {
+                            if (!_perf || !_perf.active) return fn.apply(this, arguments);
+                            var token = _perf.taskStart(widgetId);
+                            try {
+                                return fn.apply(this, arguments);
+                            } finally {
+                                _perf.taskEnd(token);
+                            }
+                        };
+                    };
+
                     var setInterval = function(fn, delay) {
-                        var id = _realWindow.setInterval(fn, delay);
+                        var id = _realWindow.setInterval(_wrap(fn), delay);
                         if (_widgetData) _widgetData._intervals.push(id);
                         return id;
                     };
@@ -395,7 +425,7 @@
                     };
 
                     var setTimeout = function(fn, delay) {
-                        var id = _realWindow.setTimeout(fn, delay);
+                        var id = _realWindow.setTimeout(_wrap(fn), delay);
                         if (_widgetData) _widgetData._timeouts.push(id);
                         return id;
                     };
@@ -411,16 +441,20 @@
                         get: function(target, prop) {
                             if (prop === 'addEventListener') {
                                 return function(type, listener, options) {
-                                    if (_widgetData) _widgetData._windowListeners.push({type, listener, options});
-                                    return _realWindow.addEventListener(type, listener, options);
+                                    var wrapped = _wrap(listener);
+                                    if (_widgetData) _widgetData._windowListeners.push({type, listener: wrapped, options, original: listener});
+                                    return _realWindow.addEventListener(type, wrapped, options);
                                 };
                             }
                             if (prop === 'removeEventListener') {
                                 return function(type, listener, options) {
                                     if (_widgetData) {
-                                        _widgetData._windowListeners = _widgetData._windowListeners.filter(
-                                            l => l.type !== type || l.listener !== listener
-                                        );
+                                        var found = _widgetData._windowListeners.find(l => l.type === type && (l.listener === listener || l.original === listener));
+                                        if (found) {
+                                            _realWindow.removeEventListener(type, found.listener, options);
+                                            _widgetData._windowListeners = _widgetData._windowListeners.filter(l => l !== found);
+                                            return;
+                                        }
                                     }
                                     return _realWindow.removeEventListener(type, listener, options);
                                 };
@@ -429,6 +463,15 @@
                             if (prop === 'clearInterval') return clearInterval;
                             if (prop === 'setTimeout') return setTimeout;
                             if (prop === 'clearTimeout') return clearTimeout;
+                            
+                            if (prop === 'requestAnimationFrame') {
+                                return function(callback) {
+                                    return _realWindow.requestAnimationFrame(function(timestamp) {
+                                        if (_perf && _perf.active) _perf.recordFrame(widgetId);
+                                        _wrap(callback)(timestamp);
+                                    });
+                                };
+                            }
                             
                             var val = target[prop];
                             return typeof val === 'function' ? val.bind(target) : val;
@@ -445,8 +488,23 @@
                         createRange: _realDoc.createRange.bind(_realDoc),
                         createComment: _realDoc.createComment.bind(_realDoc),
                         createDocumentFragment: _realDoc.createDocumentFragment.bind(_realDoc),
-                        addEventListener: function(type, fn, opts) { root.addEventListener(type, fn, opts); },
-                        removeEventListener: function(type, fn, opts) { root.removeEventListener(type, fn, opts); },
+                        addEventListener: function(type, fn, opts) {
+                            var wrapped = _wrap(fn);
+                            if (_widgetData) _widgetData._docListeners = _widgetData._docListeners || [];
+                            if (_widgetData) _widgetData._docListeners.push({type, listener: wrapped, options: opts, original: fn});
+                            root.addEventListener(type, wrapped, opts);
+                        },
+                        removeEventListener: function(type, fn, opts) {
+                            if (_widgetData && _widgetData._docListeners) {
+                                var found = _widgetData._docListeners.find(l => l.type === type && (l.listener === fn || l.original === fn));
+                                if (found) {
+                                    root.removeEventListener(type, found.listener, opts);
+                                    _widgetData._docListeners = _widgetData._docListeners.filter(l => l !== found);
+                                    return;
+                                }
+                            }
+                            root.removeEventListener(type, fn, opts);
+                        },
                         body: root,
                         head: _realDoc.head,
                         documentElement: root,
