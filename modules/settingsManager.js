@@ -79,7 +79,7 @@ const settingsManager = (() => {
      * Displays the appropriate settings view (agent, group, or default prompt)
      * based on the currently selected item.
      */
-    function displaySettingsForItem() {
+    async function displaySettingsForItem() {
         const currentSelectedItem = refs.currentSelectedItemRef.get();
 
         const agentSettingsExists = agentSettingsContainer && typeof agentSettingsContainer.style !== 'undefined';
@@ -94,7 +94,7 @@ const settingsManager = (() => {
                 if (groupSettingsExists) groupSettingsContainer.style.display = 'none';
                 itemSettingsContainerTitle.textContent = 'Agent 设置: ';
                 deleteItemBtn.textContent = '删除此 Agent';
-                populateAgentSettingsForm(currentSelectedItem.id, (currentSelectedItem.config || currentSelectedItem));
+                await populateAgentSettingsForm(currentSelectedItem.id, (currentSelectedItem.config || currentSelectedItem));
             } else if (currentSelectedItem.type === 'group') {
                 if (agentSettingsExists) agentSettingsContainer.style.display = 'none';
                 if (groupSettingsExists) groupSettingsContainer.style.display = 'block';
@@ -137,21 +137,21 @@ const settingsManager = (() => {
         editingAgentIdInput.value = agentId;
         agentNameInput.value = agentConfig.name || agentId;
 
-        // Initialize PromptManager
+        // Initialize PromptManager (Singleton Pattern)
         const systemPromptContainer = document.getElementById('systemPromptContainer');
         if (systemPromptContainer && window.PromptManager) {
-            if (promptManager) {
-                // Save current state before switching
+            if (!promptManager) {
+                promptManager = new window.PromptManager();
+                await promptManager.init({
+                    containerElement: systemPromptContainer,
+                    electronAPI: electronAPI
+                });
+            } else {
+                // Save current state before switching context
                 await promptManager.saveCurrentModeData();
             }
 
-            promptManager = new window.PromptManager();
-            await promptManager.init({
-                agentId: agentId,
-                config: agentConfig,
-                containerElement: systemPromptContainer,
-                electronAPI: electronAPI
-            });
+            await promptManager.updateAgentContext(agentId, agentConfig);
         }
 
         agentModelInput.value = agentConfig.model || '';
@@ -747,12 +747,16 @@ const settingsManager = (() => {
                 electronAPI.onModelsUpdated(async (models) => {
                     console.log('[SettingsManager] Received models-updated event. Repopulating list.');
                     let hotModelIds = [];
+                    let favoriteModelIds = [];
                     try {
                         if (electronAPI.getHotModels) {
                             hotModelIds = await electronAPI.getHotModels();
                         }
+                        if (electronAPI.getFavoriteModels) {
+                            favoriteModelIds = await electronAPI.getFavoriteModels();
+                        }
                     } catch (e) { /* ignore */ }
-                    populateModelList(models, currentModelSelectCallback, hotModelIds);
+                    populateModelList(models, currentModelSelectCallback, hotModelIds, favoriteModelIds);
                     uiHelper.showToastNotification('模型列表已刷新', 'success');
                 });
             }
@@ -815,6 +819,17 @@ const settingsManager = (() => {
                 vcpServerUrlInput.addEventListener('blur', () => {
                     const completedUrl = completeVcpUrl(vcpServerUrlInput.value);
                     vcpServerUrlInput.value = completedUrl;
+                });
+            }
+        },
+        prewarmPromptManager: async () => {
+            const systemPromptContainer = document.getElementById('systemPromptContainer');
+            if (systemPromptContainer && window.PromptManager && !promptManager) {
+                console.log('[SettingsManager] Pre-warming PromptManager...');
+                promptManager = new window.PromptManager();
+                await promptManager.init({
+                    containerElement: systemPromptContainer,
+                    electronAPI: electronAPI
                 });
             }
         },
@@ -1022,12 +1037,33 @@ const settingsManager = (() => {
         }
         modelList.innerHTML = ''; // Clear existing list
 
-        if (!models || models.length === 0) {
+        const isSingleModelObject = models
+            && typeof models === 'object'
+            && !Array.isArray(models)
+            && typeof models.id === 'string';
+
+        const normalizedModels = Array.isArray(models)
+            ? models
+            : Array.isArray(models?.data)
+                ? models.data
+                : Array.isArray(models?.models)
+                    ? models.models
+                    : isSingleModelObject
+                        ? [models]
+                        : [];
+        const normalizedHotModelIds = Array.isArray(hotModelIds) ? hotModelIds : [];
+        const normalizedFavoriteModelIds = Array.isArray(favoriteModelIds) ? favoriteModelIds : [];
+
+        if (!Array.isArray(models) && !isSingleModelObject && !Array.isArray(models?.data) && !Array.isArray(models?.models)) {
+            console.warn('[SettingsManager] populateModelList received unsupported models payload:', models);
+        }
+
+        if (normalizedModels.length === 0) {
             modelList.innerHTML = '<li>没有可用的模型。请检查您的 VCP 服务器 URL 或刷新列表。</li>';
             return;
         }
 
-        const favSet = new Set(favoriteModelIds);
+        const favSet = new Set(normalizedFavoriteModelIds);
 
         // 创建模型列表项的辅助函数
         function createModelLi(model, isHot, isFavoriteSection) {
@@ -1082,10 +1118,10 @@ const settingsManager = (() => {
         }
 
         // 🔥 热门模型分区
-        if (hotModelIds.length > 0) {
+        if (normalizedHotModelIds.length > 0) {
             // 按热门列表顺序筛选出存在于当前模型列表中的热门模型
-            const hotModels = hotModelIds
-                .map(id => models.find(m => m.id === id))
+            const hotModels = normalizedHotModelIds
+                .map(id => normalizedModels.find(m => m.id === id))
                 .filter(Boolean);
 
             if (hotModels.length > 0) {
@@ -1101,9 +1137,9 @@ const settingsManager = (() => {
         }
 
         // ⭐ 收藏模型分区
-        if (favoriteModelIds.length > 0) {
-            const favoriteModels = favoriteModelIds
-                .map(id => models.find(m => m.id === id))
+        if (normalizedFavoriteModelIds.length > 0) {
+            const favoriteModels = normalizedFavoriteModelIds
+                .map(id => normalizedModels.find(m => m.id === id))
                 .filter(Boolean);
 
             if (favoriteModels.length > 0) {
@@ -1119,13 +1155,13 @@ const settingsManager = (() => {
         }
 
         // 📋 全部模型分区
-        if (models.length > 0) {
+        if (normalizedModels.length > 0) {
             const allTitle = document.createElement('li');
             allTitle.className = 'model-section-title';
             allTitle.textContent = '📋 全部模型';
             modelList.appendChild(allTitle);
 
-            models.forEach(model => {
+            normalizedModels.forEach(model => {
                 modelList.appendChild(createModelLi(model, false, false));
             });
         }
