@@ -13,6 +13,7 @@ let globalSettings = {
     enableRegenerateConfirmation: true, // 重新回复确认机制开关
     flowlockContinueDelay: 5, // 心流锁续写延迟（秒）
     enableThoughtChainInjection: false, // 元思考注入上下文开关
+    fileKey: '',
     enableWideChatLayout: false,
     chatBubbleMaxWidthDefault: 82,
     chatBubbleMaxWidthNotifications: 90,
@@ -30,6 +31,17 @@ let globalSettings = {
     chatToolFontCustom: '',
     enableUserChatBubbleUi: true,
     showUserMetaInChatBubbleUi: true,
+    voiceMode: 'local',
+    speechRecognizerBrowserPath: '',
+    speechRecognizerPagePath: 'Voicechatmodules/recognizer.html',
+    voiceLocalSettings: {
+        sovitsUrl: '',
+        sovitsKey: ''
+    },
+    voiceNetworkSettings: {
+        providerUrl: 'https://api.siliconflow.cn',
+        providerKey: ''
+    }
 };
 // Unified selected item state
 let currentSelectedItem = {
@@ -298,6 +310,13 @@ import { setupEventListeners } from './modules/event-listeners.js';
         });
     } else {
         console.error('[RENDERER_INIT] emoticonManager module not found!');
+    }
+
+    // Initialize App Tray Manager
+    if (window.trayManager) {
+        window.trayManager.init();
+    } else {
+        console.error('[RENDERER_INIT] trayManager module not found!');
     }
 
     // 确保在GroupRenderer初始化之前，其容器已准备好
@@ -1973,11 +1992,20 @@ async function syncGlobalSettingsToUI() {
     const completedUrl = window.settingsManager.completeVcpUrl(globalSettings.vcpServerUrl || '');
     safeSet('vcpServerUrl', completedUrl);
     safeSet('vcpApiKey', globalSettings.vcpApiKey || '');
+    safeSet('fileKey', globalSettings.fileKey || '');
     safeSet('vcpLogUrl', globalSettings.vcpLogUrl || '');
     safeSet('vcpLogKey', globalSettings.vcpLogKey || '');
     safeSet('topicSummaryModel', globalSettings.topicSummaryModel || '');
     safeSet('continueWritingPrompt', globalSettings.continueWritingPrompt || '请继续');
     safeSet('flowlockContinueDelay', globalSettings.flowlockContinueDelay ?? 5);
+    safeCheck('voiceModeLocal', (globalSettings.voiceMode || 'local') !== 'network');
+    safeCheck('voiceModeNetwork', (globalSettings.voiceMode || 'local') === 'network');
+    safeSet('speechRecognizerBrowserPath', globalSettings.speechRecognizerBrowserPath || '');
+    safeSet('speechRecognizerPagePath', globalSettings.speechRecognizerPagePath || 'Voicechatmodules/recognizer.html');
+    safeSet('voiceLocalSovitsUrl', globalSettings.voiceLocalSettings?.sovitsUrl || '');
+    safeSet('voiceLocalSovitsKey', globalSettings.voiceLocalSettings?.sovitsKey || '');
+    safeSet('voiceNetworkProviderUrl', globalSettings.voiceNetworkSettings?.providerUrl || '');
+    safeSet('voiceNetworkProviderKey', globalSettings.voiceNetworkSettings?.providerKey || '');
     
     // Network Notes Paths
     const networkNotesPathsContainer = document.getElementById('networkNotesPathsContainer');

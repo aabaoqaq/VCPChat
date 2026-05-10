@@ -17,6 +17,7 @@ let searchAbortController = null; // 搜索请求控制器
 let isBatchMode = false;
 let selectedMemos = new Set(); // Set of "folder:::name" strings
 let hiddenFolders = new Set(); // Set of hidden folder names
+let collapsedCategories = new Set(); // Set of collapsed category IDs
 let folderOrder = []; // Array of folder names for UI sorting
 let draggedFolder = null; // Currently dragged folder name
 let memoStartupBlocked = false;
@@ -39,6 +40,8 @@ const editorStatus = document.getElementById('editor-status');
 const createModal = document.getElementById('create-modal');
 const newMemoDateInput = document.getElementById('new-memo-date');
 const newMemoMaidInput = document.getElementById('new-memo-maid');
+const newMemoFilenameInput = document.getElementById('new-memo-filename');
+const newMemoTagsInput = document.getElementById('new-memo-tags');
 const newMemoContentInput = document.getElementById('new-memo-content');
 
 function blockStartup(message) {
@@ -91,11 +94,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupEventListeners();
 
     // 监听窗口尺寸变化以更新 Pretext
-    window.addEventListener('resize', () => {
+    const debouncedRecalculatePretext = debounce(() => {
         if (window.pretextBridge && window.pretextBridge.isReady()) {
             window.pretextBridge.recalculateAll(window.innerWidth);
         }
-    });
+    }, 180);
+
+    window.addEventListener('resize', debouncedRecalculatePretext);
 
     // 初始化工作台
     if (window.DiaryWorkbench) {
@@ -128,6 +133,9 @@ async function initApp() {
         if (memoConfig) {
             if (memoConfig.hiddenFolders) {
                 hiddenFolders = new Set(memoConfig.hiddenFolders);
+            }
+            if (memoConfig.collapsedCategories) {
+                collapsedCategories = new Set(memoConfig.collapsedCategories);
             }
             if (memoConfig.folderOrder) {
                 folderOrder = memoConfig.folderOrder;
@@ -278,12 +286,9 @@ function setupEventListeners() {
 
     // 联想弹窗事件
     const kInput = document.getElementById('input-assoc-k');
-    const boostInput = document.getElementById('input-assoc-boost');
     const kValueLabel = document.getElementById('label-k-value');
-    const boostValueLabel = document.getElementById('label-boost-value');
 
     if (kInput) kInput.oninput = () => kValueLabel.textContent = kInput.value;
-    if (boostInput) boostInput.oninput = () => boostValueLabel.textContent = boostInput.value;
 
     document.getElementById('close-assoc-config-btn').onclick = () => {
         document.getElementById('assoc-config-modal').style.display = 'none';
@@ -551,85 +556,126 @@ function renderFolders(folders) {
     // 更新 folderOrder 以包含新发现的文件夹
     folderOrder = visibleFolders;
 
-    visibleFolders.forEach(folder => {
-        // 侧边栏列表
-        const item = document.createElement('div');
-        item.className = `folder-item ${folder === currentFolder ? 'active' : ''}`;
-        item.setAttribute('draggable', 'true');
-        item.innerHTML = `
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-            <span>${escapeHtml(folder)}</span>
+    // 分类逻辑
+    const clusters = visibleFolders.filter(f => f.endsWith('簇'));
+    const diaries = visibleFolders.filter(f => !f.endsWith('簇'));
+
+    const categories = [
+        { id: 'diary', name: '日记 / 知识库', folders: diaries },
+        { id: 'cluster', name: '思维簇', folders: clusters }
+    ];
+
+    categories.forEach(cat => {
+        if (cat.folders.length === 0) return;
+
+        const catEl = document.createElement('div');
+        catEl.className = `folder-category ${collapsedCategories.has(cat.id) ? 'collapsed' : ''}`;
+        catEl.id = `cat-${cat.id}`;
+
+        const header = document.createElement('div');
+        header.className = 'category-header';
+        header.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            <span>${cat.name}</span>
         `;
-        item.onclick = () => selectFolder(folder);
+        header.onclick = () => toggleCategory(cat.id);
 
-        // 拖拽事件
-        item.ondragstart = (e) => {
-            draggedFolder = folder;
-            item.classList.add('dragging');
-            e.dataTransfer.effectAllowed = 'move';
-        };
+        const content = document.createElement('div');
+        content.className = 'category-content';
 
-        item.ondragover = (e) => {
-            e.preventDefault();
-            if (draggedFolder !== folder) {
-                item.classList.add('drag-over');
-            }
-            return false;
-        };
+        cat.folders.forEach(folder => {
+            const item = document.createElement('div');
+            item.className = `folder-item ${folder === currentFolder ? 'active' : ''}`;
+            item.setAttribute('draggable', 'true');
+            item.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                <span>${escapeHtml(folder)}</span>
+            `;
+            item.onclick = () => selectFolder(folder);
 
-        item.ondragleave = () => {
-            item.classList.remove('drag-over');
-        };
+            // 拖拽事件
+            item.ondragstart = (e) => {
+                draggedFolder = folder;
+                item.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+            };
 
-        item.ondrop = async (e) => {
-            e.preventDefault();
-            item.classList.remove('drag-over');
-            if (draggedFolder && draggedFolder !== folder) {
-                // 重新排序
-                const fromIndex = folderOrder.indexOf(draggedFolder);
-                const toIndex = folderOrder.indexOf(folder);
-
-                folderOrder.splice(fromIndex, 1);
-                folderOrder.splice(toIndex, 0, draggedFolder);
-
-                renderFolders(folders); // 重新渲染
-                await saveMemoConfig(); // 持久化
-            }
-            return false;
-        };
-
-        item.ondragend = () => {
-            item.classList.remove('dragging');
-            draggedFolder = null;
-        };
-
-        // 文件夹右键菜单
-        item.oncontextmenu = (e) => {
-            showContextMenu(e, [
-                {
-                    label: '删除文件夹',
-                    className: 'danger',
-                    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>',
-                    onClick: () => handleDeleteFolder(folder)
-                },
-                {
-                    label: '隐藏文件夹',
-                    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>',
-                    onClick: () => handleHideFolder(folder)
+            item.ondragover = (e) => {
+                e.preventDefault();
+                if (draggedFolder !== folder) {
+                    item.classList.add('drag-over');
                 }
-            ]);
-        };
+                return false;
+            };
 
-        folderListEl.appendChild(item);
+            item.ondragleave = () => {
+                item.classList.remove('drag-over');
+            };
 
-        // 批量移动下拉框
-        if (folder !== currentFolder) {
-            const opt = document.createElement('option');
-            opt.value = folder;
-            opt.textContent = folder;
-            moveSelect.appendChild(opt);
-        }
+            item.ondrop = async (e) => {
+                e.preventDefault();
+                item.classList.remove('drag-over');
+                if (draggedFolder && draggedFolder !== folder) {
+                    const fromIndex = folderOrder.indexOf(draggedFolder);
+                    const toIndex = folderOrder.indexOf(folder);
+                    folderOrder.splice(fromIndex, 1);
+                    folderOrder.splice(toIndex, 0, draggedFolder);
+                    renderFolders(folders);
+                    await saveMemoConfig();
+                }
+                return false;
+            };
+
+            item.ondragend = () => {
+                item.classList.remove('dragging');
+                draggedFolder = null;
+            };
+
+            // 文件夹右键菜单
+            item.oncontextmenu = (e) => {
+                showContextMenu(e, [
+                    {
+                        label: '删除文件夹',
+                        className: 'danger',
+                        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>',
+                        onClick: () => handleDeleteFolder(folder)
+                    },
+                    {
+                        label: '隐藏文件夹',
+                        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>',
+                        onClick: () => handleHideFolder(folder)
+                    }
+                ]);
+            };
+
+            content.appendChild(item);
+
+            // 批量移动下拉框
+            if (folder !== currentFolder) {
+                const opt = document.createElement('option');
+                opt.value = folder;
+                opt.textContent = folder;
+                moveSelect.appendChild(opt);
+            }
+        });
+
+        catEl.appendChild(header);
+        catEl.appendChild(content);
+        folderListEl.appendChild(catEl);
     });
+}
+
+async function toggleCategory(catId) {
+    const catEl = document.getElementById(`cat-${catId}`);
+    if (!catEl) return;
+
+    const isCollapsed = catEl.classList.toggle('collapsed');
+    if (isCollapsed) {
+        collapsedCategories.add(catId);
+    } else {
+        collapsedCategories.delete(catId);
+    }
+    await saveMemoConfig();
 }
 
 async function selectFolder(folderName) {
@@ -665,6 +711,10 @@ function renderMemos(memos) {
         return;
     }
 
+    const gridWidth = memoGridEl.offsetWidth;
+    const columns = window.innerWidth > 1200 ? 3 : (window.innerWidth > 800 ? 2 : 1);
+    const estimatedCardWidth = (gridWidth ? (gridWidth / columns) - 32 : 300);
+
     memos.forEach(memo => {
         const card = document.createElement('div');
         const memoFolder = memo.folderName || currentFolder;
@@ -675,12 +725,9 @@ function renderMemos(memos) {
         const dateStr = new Date(memo.lastModified).toLocaleString();
 
         const previewText = memo.preview || '无预览内容';
-        const cardWidth = memoGridEl.offsetWidth / (window.innerWidth > 1200 ? 3 : (window.innerWidth > 800 ? 2 : 1)) - 32; // 估算单卡片宽度
-        
-        if (window.pretextBridge && window.pretextBridge.isReady()) {
-            // 预先测算高度并缓存，减少后续 reflow
-            window.pretextBridge.estimateHeight(memoId, previewText, 'memo', cardWidth || 300);
-        }
+
+        card.dataset.memoId = memoId;
+        card.dataset.pretextWidth = String(Math.max(estimatedCardWidth, 240));
 
         card.innerHTML = `
             <div>
@@ -719,6 +766,39 @@ function renderMemos(memos) {
         };
         memoGridEl.appendChild(card);
     });
+
+    scheduleVisibleMemoPretextEstimation();
+}
+
+function scheduleVisibleMemoPretextEstimation() {
+    if (!window.pretextBridge || !window.pretextBridge.isReady()) return;
+
+    const cards = Array.from(memoGridEl.querySelectorAll('.memo-card'));
+    if (cards.length === 0) return;
+
+    const run = () => {
+        const visibleCards = cards.filter(card => {
+            const rect = card.getBoundingClientRect();
+            return rect.bottom >= -200 && rect.top <= window.innerHeight + 200;
+        });
+
+        visibleCards.forEach(card => {
+            const previewEl = card.querySelector('.preview');
+            const memoId = card.dataset.memoId;
+            const width = Number(card.dataset.pretextWidth) || 300;
+            const text = previewEl?.textContent || '';
+
+            if (memoId && text) {
+                window.pretextBridge.estimateHeight(memoId, text, 'memo', width);
+            }
+        });
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(run, { timeout: 300 });
+    } else {
+        setTimeout(run, 0);
+    }
 }
 
 function updateBatchUI() {
@@ -805,7 +885,15 @@ function renderPreview(content) {
         // Pretext 高度测算
         if (window.pretextBridge && window.pretextBridge.isReady() && currentMemo) {
             const previewWidth = editorPreview.offsetWidth || 600;
-            window.pretextBridge.estimateHeight('memo-preview-' + currentMemo.file, content, 'memo', previewWidth);
+            const estimatePreviewHeight = () => {
+                window.pretextBridge.estimateHeight('memo-preview-' + currentMemo.file, content, 'memo', previewWidth);
+            };
+
+            if (typeof window.requestIdleCallback === 'function') {
+                window.requestIdleCallback(estimatePreviewHeight, { timeout: 250 });
+            } else {
+                setTimeout(estimatePreviewHeight, 0);
+            }
         }
 
         // KaTeX 渲染
@@ -905,6 +993,8 @@ async function handleDeleteMemo() {
 async function handleCreateMemo() {
     const date = newMemoDateInput.value;
     const maid = newMemoMaidInput.value.trim();
+    const fileName = newMemoFilenameInput.value.trim();
+    const tags = newMemoTagsInput.value.trim();
     const content = newMemoContentInput.value.trim();
 
     if (!date || !maid || !content) {
@@ -920,14 +1010,22 @@ async function handleCreateMemo() {
         const settings = await api.loadSettings();
         if (!settings?.vcpApiKey) throw new Error('API Key 未配置');
 
-        // 构造 TOOL_REQUEST
-        const toolRequest = `<<<[TOOL_REQUEST]>>>
-maid:「始」${maid}「末」,
+        // 构造 TOOL_REQUEST（可选字段仅在有值时加入）
+        let toolFields = `maid:「始」${maid}「末」,
 tool_name:「始」DailyNote「末」,
 command:「始」create「末」,
-Date:「始」${date}「末」,
-Content:「始」${content}「末」
-<<<[END_TOOL_REQUEST]>>>`;
+Date:「始」${date}「末」,`;
+
+        if (fileName) {
+            toolFields += `\nfileName:「始」${fileName}「末」,`;
+        }
+        if (tags) {
+            toolFields += `\nTag:「始」${tags}「末」,`;
+        }
+
+        toolFields += `\nContent:「始」${content}「末」`;
+
+        const toolRequest = `<<<[TOOL_REQUEST]>>>\n${toolFields}\n<<<[END_TOOL_REQUEST]>>>`;
 
         const res = await fetch(`${serverBaseUrl}v1/human/tool`, {
             method: 'POST',
@@ -943,6 +1041,8 @@ Content:「始」${content}「末」
         // 成功后处理
         createModal.style.display = 'none';
         newMemoContentInput.value = '';
+        newMemoFilenameInput.value = '';
+        newMemoTagsInput.value = '';
 
         // 延迟刷新，给后端一点处理时间
         setTimeout(async () => {
@@ -1214,6 +1314,7 @@ async function saveMemoConfig() {
     try {
         await api.saveMemoConfig({
             hiddenFolders: Array.from(hiddenFolders),
+            collapsedCategories: Array.from(collapsedCategories),
             folderOrder: folderOrder
         });
     } catch (error) {

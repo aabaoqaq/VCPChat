@@ -31,6 +31,10 @@ export async function handleSaveGlobalSettings(e, deps) {
             .filter(Boolean);
     };
 
+    const voiceMode = document.getElementById('voiceModeNetwork')?.checked ? 'network' : 'local';
+    const speechRecognizerBrowserPath = document.getElementById('speechRecognizerBrowserPath')?.value.trim() || '';
+    const speechRecognizerPagePath = document.getElementById('speechRecognizerPagePath')?.value.trim() || '';
+
     const newSettings = {
         userName: document.getElementById('userName').value.trim() || '用户',
         userAvatarBorderColor: document.getElementById('userAvatarBorderColor')?.value || '#3d5a80',
@@ -45,6 +49,7 @@ export async function handleSaveGlobalSettings(e, deps) {
         enableRegenerateConfirmation: document.getElementById('enableRegenerateConfirmation').checked,
         vcpServerUrl: settingsManager.completeVcpUrl(document.getElementById('vcpServerUrl').value.trim()),
         vcpApiKey: document.getElementById('vcpApiKey').value,
+        fileKey: document.getElementById('fileKey')?.value || '',
         vcpLogUrl: document.getElementById('vcpLogUrl').value.trim(),
         vcpLogKey: document.getElementById('vcpLogKey').value.trim(),
         topicSummaryModel: document.getElementById('topicSummaryModel').value.trim(),
@@ -76,6 +81,17 @@ export async function handleSaveGlobalSettings(e, deps) {
         minChunkBufferSize: parseInt(document.getElementById('minChunkBufferSize').value, 10) || 16,
         smoothStreamIntervalMs: parseInt(document.getElementById('smoothStreamIntervalMs').value, 10) || 100,
         assistantAgent: document.getElementById('assistantAgent').value,
+        voiceMode,
+        speechRecognizerBrowserPath,
+        speechRecognizerPagePath,
+        voiceLocalSettings: {
+            sovitsUrl: document.getElementById('voiceLocalSovitsUrl')?.value.trim() || '',
+            sovitsKey: document.getElementById('voiceLocalSovitsKey')?.value || ''
+        },
+        voiceNetworkSettings: {
+            providerUrl: document.getElementById('voiceNetworkProviderUrl')?.value.trim() || '',
+            providerKey: document.getElementById('voiceNetworkProviderKey')?.value || ''
+        },
         enableDistributedServer: document.getElementById('enableDistributedServer').checked,
         agentMusicControl: document.getElementById('agentMusicControl').checked,
         enableVcpToolInjection: document.getElementById('enableVcpToolInjection').checked,

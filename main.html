@@ -658,59 +658,30 @@
                 <!-- 邀请发言按钮将由 JavaScript 动态填充到这里 -->
             </div>
             <hr class="section-divider">
-            <div class="notes-section">
-                <button id="openTranslatorBtn" class="header-button" title="翻译">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" class="lucide lucide-languages-icon lucide-languages"
-                        aria-hidden="true">
-                        <path d="m5 8 6 6" />
-                        <path d="m4 14 6-6 2-3" />
-                        <path d="M2 5h12" />
-                        <path d="M7 2h1" />
-                        <path d="m22 22-5-10-5 10" />
-                        <path d="M14 18h6" />
+            <div id="vchatAppTray" class="notes-section">
+                <!-- App tray UI -->
+                <div id="appTrayPinnedApps" class="app-tray-pinned-apps"></div>
+                <button id="appTrayMoreBtn" class="app-tray-more-btn" title="更多应用">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="1"></circle>
+                        <circle cx="19" cy="12" r="1"></circle>
+                        <circle cx="5" cy="12" r="1"></circle>
                     </svg>
-                    <span class="notes-button-label">翻译</span>
                 </button>
-                <button id="openNotesBtn" class="header-button" title="打开笔记">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" class="lucide lucide-notebook-pen-icon lucide-notebook-pen"
-                        aria-hidden="true">
-                        <path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4" />
-                        <path d="M2 6h4" />
-                        <path d="M2 10h4" />
-                        <path d="M2 14h4" />
-                        <path d="M2 18h4" />
-                        <path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" />
-                    </svg>
-                    <span class="notes-button-label">笔记</span>
-                </button>
-                <button id="openMusicBtn" class="header-button" title="音乐播放器">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" class="lucide lucide-list-music-icon lucide-list-music"
-                        aria-hidden="true">
-                        <path d="M16 5H3" />
-                        <path d="M11 12H3" />
-                        <path d="M11 19H3" />
-                        <path d="M21 16V5" />
-                        <circle cx="18" cy="16" r="3" />
-                    </svg>
-                    <span class="notes-button-label">音乐</span>
-                </button>
-                <button id="openCanvasBtn" class="header-button" title="协同">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" class="lucide lucide-code-xml-icon lucide-code-xml"
-                        aria-hidden="true">
-                        <path d="m18 16 4-4-4-4" />
-                        <path d="m6 8-4 4 4 4" />
-                        <path d="m14.5 4-5 16" />
-                    </svg>
-                    <span class="notes-button-label">协同</span>
-                </button>
+                <div id="appTrayDrawer" class="app-tray-drawer">
+                    <div class="app-tray-drawer-header">
+                        <span class="app-tray-drawer-title">全部应用</span>
+                        <div class="app-tray-drawer-actions">
+                            <button id="appTraySettingsBtn" class="app-tray-settings-btn" title="设置托盘显示的按钮">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="12" r="3"></circle>
+                                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="appTrayDrawerGrid" class="app-tray-drawer-grid"></div>
+                </div>
             </div>
         </aside>
     </div>
@@ -761,6 +732,15 @@
                                     <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
                                 </svg>
                                 <span>划词助手</span>
+                            </li>
+                            <li class="settings-nav-item" data-section="voice-settings">
+                                <svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path d="M12 19v3"></path>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                    <rect x="9" y="2" width="6" height="13" rx="3"></rect>
+                                </svg>
+                                <span>语音设置</span>
                             </li>
                             <li class="settings-nav-item" data-section="advanced-features">
                                 <svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -883,6 +863,13 @@
                                 <div class="settings-form-group">
                                     <label for="vcpLogUrl">VCP WebSocket服务器 URL:</label>
                                     <input type="url" id="vcpLogUrl" name="vcpLogUrl">
+                                </div>
+                                <div class="settings-form-group">
+                                    <label for="fileKey">VCP文件/图床密码:</label>
+                                    <input type="password" id="fileKey" name="fileKey" placeholder="用于拼接表情包图片地址">
+                                    <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                                        用于访问VCP返回的文件/图片地址，将拼接为 [`/pw=密码/images或files/分类/文件名`]。
+                                    </small>
                                 </div>
                                 <div class="settings-form-group">
                                     <label for="vcpLogKey">VCP WebSocket鉴权 Key:</label>
@@ -1312,6 +1299,90 @@
                                                 </small>
                                             </div>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 语音设置 -->
+                            <div class="settings-section" id="section-voice-settings">
+                                <h3 class="settings-section-title">语音设置</h3>
+
+                                <div class="settings-subsection">
+                                    <div class="settings-subsection-heading">
+                                        <div class="settings-subsection-title">全局语音模式</div>
+                                        <p class="settings-subsection-description">为后续语音聊天、STT 与 TTS 能力扩展预留统一配置入口。</p>
+                                    </div>
+
+                                    <div class="form-group" style="margin-bottom: 18px;">
+                                        <label style="display: block; margin-bottom: 8px;">语音工作模式</label>
+                                        <div class="form-group-inline" style="gap: 18px; align-items: center; flex-wrap: wrap;">
+                                            <label for="voiceModeLocal"
+                                                style="display: inline-flex; align-items: center; gap: 6px; margin: 0;">
+                                                <input type="radio" id="voiceModeLocal" name="voiceMode" value="local" checked>
+                                                <span>本地推理模式</span>
+                                            </label>
+                                            <label for="voiceModeNetwork"
+                                                style="display: inline-flex; align-items: center; gap: 6px; margin: 0;">
+                                                <input type="radio" id="voiceModeNetwork" name="voiceMode" value="network">
+                                                <span>网络 API 模式</span>
+                                            </label>
+                                        </div>
+                                        <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                                            该选项为全局语音管线预留主开关，当前主要作用于语音聊天体系配置分流。
+                                        </small>
+                                    </div>
+
+                                    <div class="settings-form-group">
+                                        <label for="speechRecognizerBrowserPath">STT 浏览器路径:</label>
+                                        <input type="text" id="speechRecognizerBrowserPath" name="speechRecognizerBrowserPath"
+                                            placeholder="留空自动探测系统 Chrome / Puppeteer Chromium">
+                                        <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                                            用于反代网页获取 STT 功能时启动浏览器。支持自定义 Chrome / Chromium 可执行文件路径。
+                                        </small>
+                                    </div>
+
+                                    <div class="settings-form-group">
+                                        <label for="speechRecognizerPagePath">STT 浏览器识别页路径:</label>
+                                        <input type="text" id="speechRecognizerPagePath" name="speechRecognizerPagePath"
+                                            placeholder="默认: Voicechatmodules/recognizer.html">
+                                        <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                                            可配置用于浏览器语音识别的本地 HTML 页面相对路径，默认使用内置识别页。
+                                        </small>
+                                    </div>
+                                </div>
+
+                                <div class="settings-subsection">
+                                    <div class="settings-subsection-heading">
+                                        <div class="settings-subsection-title">网络 API 模式</div>
+                                        <p class="settings-subsection-description">当语音模式为“网络 API 模式”时，使用网络供应商配置作为主要推理入口。</p>
+                                    </div>
+
+                                    <div class="settings-form-group">
+                                        <label for="voiceNetworkProviderUrl">网络供应商 URL:</label>
+                                        <input type="url" id="voiceNetworkProviderUrl" name="voiceNetworkProviderUrl"
+                                            placeholder="例如: https://api.example.com/voice">
+                                    </div>
+                                    <div class="settings-form-group">
+                                        <label for="voiceNetworkProviderKey">网络供应商 Key:</label>
+                                        <input type="password" id="voiceNetworkProviderKey" name="voiceNetworkProviderKey">
+                                    </div>
+                                </div>
+
+                                <div class="settings-subsection">
+                                    <div class="settings-subsection-heading">
+                                        <div class="settings-subsection-title">本地推理模式</div>
+                                        <p class="settings-subsection-description">当语音模式为“本地推理模式”时，优先使用本地 SoVITS；下方填写本地推理服务配置。</p>
+                                    </div>
+
+                                    <div class="settings-form-group">
+                                        <label for="voiceLocalSovitsUrl">本地 SoVITS URL:</label>
+                                        <input type="url" id="voiceLocalSovitsUrl" name="voiceLocalSovitsUrl"
+                                            placeholder="例如: http://127.0.0.1:9880">
+                                    </div>
+                                    <div class="settings-form-group">
+                                        <label for="voiceLocalSovitsKey">本地 SoVITS Key:</label>
+                                        <input type="password" id="voiceLocalSovitsKey" name="voiceLocalSovitsKey"
+                                            placeholder="如无可留空">
                                     </div>
                                 </div>
                             </div>
@@ -1847,6 +1918,7 @@
     <script src="modules/settingsManager.js"></script>
     <script src="modules/emoticonManager.js"></script> <!-- 新增：用户表情包管理器 -->
     <script src="modules/filterManager.js"></script> <!-- 新增：过滤规则管理器 -->
+    <script src="modules/trayManager.js"></script> <!-- 新增：应用托盘管理器 -->
     <script src="modules/ui-helpers.js"></script>
     <!-- Promptmodules -->
     <script src="Promptmodules/original-prompt-module.js"></script>

@@ -486,6 +486,12 @@ function createTray() {
                 void toggleRagObserverVisibility();
             }
         },
+        {
+            label: '打开 VCP 桌面',
+            click: () => {
+                desktopHandlers.openDesktopWindow();
+            }
+        },
         { type: 'separator' },
         {
             label: '退出',
@@ -837,13 +843,25 @@ if (!gotTheLock) {
         });
 
         // IPC handler to trigger a refresh of the model list
-        ipcMain.on('refresh-models', async () => {
+        ipcMain.handle('refresh-models', async (event) => {
             console.log('[Main] Received refresh-models request. Re-fetching models...');
             await fetchAndCacheModels();
-            // Optionally, notify the renderer that models have been updated
-            if (mainWindow && !mainWindow.isDestroyed()) {
+
+            const result = {
+                success: Array.isArray(cachedModels) && cachedModels.length > 0,
+                models: cachedModels,
+                count: Array.isArray(cachedModels) ? cachedModels.length : 0
+            };
+
+            if (event?.sender && !event.sender.isDestroyed()) {
+                event.sender.send('models-updated', cachedModels);
+            }
+
+            if (mainWindow && !mainWindow.isDestroyed() && event?.sender !== mainWindow.webContents) {
                 mainWindow.webContents.send('models-updated', cachedModels);
             }
+
+            return result;
         });
 
 
@@ -1033,7 +1051,7 @@ if (!gotTheLock) {
             }
             return { success: false, error: 'File watcher not initialized.' };
         });
-        sovitsHandlers.initialize(mainWindow); // Initialize SovitsTTS handlers
+        sovitsHandlers.initialize(mainWindow, appSettingsManager); // Initialize SovitsTTS handlers
         musicHandlers.initialize({ mainWindow, openChildWindows, APP_DATA_ROOT_IN_PROJECT, startAudioEngine, stopAudioEngine });
         diceHandlers.initialize({ projectRoot: PROJECT_ROOT });
         themeHandlers.initialize({ mainWindow, openChildWindows, projectRoot: PROJECT_ROOT, APP_DATA_ROOT_IN_PROJECT, settingsManager: appSettingsManager });
@@ -1404,16 +1422,27 @@ ipcMain.on('open-voice-chat-window', (event, { agentId }) => {
 });
 
 // --- Speech Recognition IPC Handlers ---
-ipcMain.on('start-speech-recognition', (event) => {
+ipcMain.on('start-speech-recognition', async (event) => {
     const voiceChatWindow = openChildWindows.find(win => win.webContents === event.sender);
     if (!voiceChatWindow) return;
+
+    let speechConfig = {};
+    try {
+        const settings = await appSettingsManager.readSettings();
+        speechConfig = {
+            browserPath: settings?.speechRecognizerBrowserPath || '',
+            recognizerPagePath: settings?.speechRecognizerPagePath || 'Voicechatmodules/recognizer.html'
+        };
+    } catch (error) {
+        console.warn('[Main] Failed to read speech recognition settings, using defaults:', error.message);
+    }
 
     const speechRecognizer = require('./modules/speechRecognizer');
     speechRecognizer.start((text) => {
         if (voiceChatWindow && !voiceChatWindow.isDestroyed()) {
             voiceChatWindow.webContents.send('speech-recognition-result', text);
         }
-    });
+    }, speechConfig);
 });
 
 ipcMain.on('stop-speech-recognition', () => {

@@ -102,6 +102,7 @@ function createCatalog(ops) {
     return {
         // Shared shell/config/theme helpers
         loadSettings: query(() => ops.invoke('load-settings')),
+        loadWebindexModels: query(() => ops.invoke('load-webindex-models')),
         saveSettings: query((settings) => ops.invoke('save-settings', settings)),
         saveUserAvatar: query((avatarData) => ops.invoke('save-user-avatar', avatarData)),
         saveAvatarColor: query((data) => ops.invoke('save-avatar-color', data)),
@@ -168,7 +169,7 @@ function createCatalog(ops) {
         createAgent: query((agentName, initialConfig) => ops.invoke('create-agent', agentName, initialConfig)),
         deleteAgent: query((agentId) => ops.invoke('delete-agent', agentId)),
         getCachedModels: query(() => ops.invoke('get-cached-models')),
-        refreshModels: command(() => ops.send('refresh-models')),
+        refreshModels: query(() => ops.invoke('refresh-models')),
         getHotModels: query(() => ops.invoke('get-hot-models')),
         getFavoriteModels: query(() => ops.invoke('get-favorite-models')),
         toggleFavoriteModel: query((modelId) => ops.invoke('toggle-favorite-model', modelId)),
@@ -422,6 +423,7 @@ function createCatalog(ops) {
 
 const ALLOWED_KEYS = [
     "loadSettings",
+    "loadWebindexModels",
     "saveSettings",
     "saveUserAvatar",
     "saveAvatarColor",
@@ -503,6 +505,7 @@ const ALLOWED_KEYS = [
     "getTextContent",
     "handleTextPasteAsFile",
     "handleFileDrop",
+    "searchNotes",
     "onAddFileToInput",
     "saveAgentOrder",
     "saveTopicOrder",
@@ -573,6 +576,8 @@ const ALLOWED_KEYS = [
     "onDesktopRemoteSetWallpaper",
     "onDesktopRemoteRequest",
     "sendDesktopRemoteResponse",
+    "desktopLaunchVchatApp",
+    "desktopOpenSystemTool",
     "minimizeToTray",
     "closeApp"
 ];

@@ -168,7 +168,7 @@ function createCatalog(ops) {
         createAgent: query((agentName, initialConfig) => ops.invoke('create-agent', agentName, initialConfig)),
         deleteAgent: query((agentId) => ops.invoke('delete-agent', agentId)),
         getCachedModels: query(() => ops.invoke('get-cached-models')),
-        refreshModels: command(() => ops.send('refresh-models')),
+        refreshModels: query(() => ops.invoke('refresh-models')),
         getHotModels: query(() => ops.invoke('get-hot-models')),
         getFavoriteModels: query(() => ops.invoke('get-favorite-models')),
         toggleFavoriteModel: query((modelId) => ops.invoke('toggle-favorite-model', modelId)),
@@ -405,6 +405,7 @@ function createCatalog(ops) {
         desktopSaveDock: query((dockData) => ops.invoke('desktop-save-dock', dockData)),
         desktopLoadDock: query(() => ops.invoke('desktop-load-dock')),
         desktopSaveLayout: query((layoutData) => ops.invoke('desktop-save-layout', layoutData)),
+        desktopPatchLayout: query((patch) => ops.invoke('desktop-patch-layout', patch)),
         desktopLoadLayout: query(() => ops.invoke('desktop-load-layout')),
         desktopIconsetListPresets: query(() => ops.invoke('desktop-iconset-list-presets')),
         desktopIconsetListIcons: query((params) => ops.invoke('desktop-iconset-list-icons', params)),
@@ -457,6 +458,7 @@ const ALLOWED_KEYS = [
     "desktopSaveDock",
     "desktopLoadDock",
     "desktopSaveLayout",
+    "desktopPatchLayout",
     "desktopLoadLayout",
     "desktopIconsetListPresets",
     "desktopIconsetListIcons",
@@ -474,7 +476,9 @@ const ALLOWED_KEYS = [
     "getMusicState",
     "setMusicVolume",
     "seekMusic",
-    "sendMusicRemoteCommand"
+    "sendMusicRemoteCommand",
+    "searchNotes",
+    "handleFileDrop",
 ];
 
 const ops = createOps();

@@ -452,44 +452,102 @@ const settingsManager = (() => {
     async function populateTtsModels(currentPrimaryVoice, currentSecondaryVoice) {
         if (!agentTtsVoicePrimarySelect || !agentTtsVoiceSecondarySelect) return;
 
-        try {
-            const models = await electronAPI.sovitsGetModels();
+        const globalSettings = window.globalSettings || {};
+        const isNetworkMode = globalSettings.voiceMode === 'network';
 
+        try {
             // Clear existing options
             agentTtsVoicePrimarySelect.innerHTML = '<option value="">不使用语音</option>';
             agentTtsVoiceSecondarySelect.innerHTML = '<option value="">不使用</option>';
 
-            if (models && Object.keys(models).length > 0) {
-                for (const modelName in models) {
-                    // Create options for primary dropdown
+            let optionList = [];
+
+            if (isNetworkMode && electronAPI.loadWebindexModels) {
+                const webindexPayload = await electronAPI.loadWebindexModels();
+
+                if (Array.isArray(webindexPayload?.mergedVoiceOptions) && webindexPayload.mergedVoiceOptions.length) {
+                    optionList = webindexPayload.mergedVoiceOptions;
+                } else if (Array.isArray(webindexPayload?.models) && webindexPayload.models.length) {
+                    const firstItem = webindexPayload.models[0];
+                    if (firstItem && Array.isArray(firstItem?.mergedVoiceOptions)) {
+                        optionList = webindexPayload.models.flatMap(model => Array.isArray(model?.mergedVoiceOptions) ? model.mergedVoiceOptions : []);
+                    } else {
+                        optionList = webindexPayload.models;
+                    }
+                } else {
+                    const defaults = Array.isArray(webindexPayload?.defaults) ? webindexPayload.defaults : [];
+                    const remoteVoices = Array.isArray(webindexPayload?.remoteVoices) ? webindexPayload.remoteVoices : [];
+                    optionList = [...defaults, ...remoteVoices];
+                }
+            } else {
+                const localModels = await electronAPI.sovitsGetModels();
+                if (Array.isArray(localModels)) {
+                    optionList = localModels;
+                } else {
+                    optionList = localModels && typeof localModels === 'object'
+                        ? Object.keys(localModels).map(modelName => ({
+                            id: modelName,
+                            voice: modelName,
+                            displayName: modelName,
+                            type: 'local'
+                        }))
+                        : [];
+                }
+            }
+
+            const seenVoices = new Set();
+            optionList = optionList
+                .map(item => ({
+                    ...item,
+                    id: item?.id || item?.voice || item?.uri,
+                    voice: item?.voice || item?.uri || item?.id,
+                    displayName: item?.displayName || item?.customName || item?.name || item?.voice || item?.uri || item?.id
+                }))
+                .filter(item => {
+                    const optionValue = item.voice || item.id;
+                    if (!optionValue || seenVoices.has(optionValue)) {
+                        return false;
+                    }
+                    seenVoices.add(optionValue);
+                    return true;
+                });
+
+            if (optionList.length > 0) {
+                optionList.forEach(item => {
+                    const optionValue = item.voice || item.id;
+                    const optionLabel = item.displayName || item.voice || item.id;
+
                     const primaryOption = document.createElement('option');
-                    primaryOption.value = modelName;
-                    primaryOption.textContent = modelName;
-                    if (modelName === currentPrimaryVoice) {
+                    primaryOption.value = optionValue;
+                    primaryOption.textContent = optionLabel;
+                    if (optionValue === currentPrimaryVoice) {
                         primaryOption.selected = true;
                     }
                     agentTtsVoicePrimarySelect.appendChild(primaryOption);
 
-                    // Create options for secondary dropdown
                     const secondaryOption = document.createElement('option');
-                    secondaryOption.value = modelName;
-                    secondaryOption.textContent = modelName;
-                    if (modelName === currentSecondaryVoice) {
+                    secondaryOption.value = optionValue;
+                    secondaryOption.textContent = optionLabel;
+                    if (optionValue === currentSecondaryVoice) {
                         secondaryOption.selected = true;
                     }
                     agentTtsVoiceSecondarySelect.appendChild(secondaryOption);
-                }
+                });
             } else {
-                const disabledOption = '<option value="" disabled>未找到模型,请启动Sovits</option>';
+                const disabledOption = isNetworkMode
+                    ? '<option value="" disabled>未找到网络音色，请先获取列表并刷新 webindexmodel.json</option>'
+                    : '<option value="" disabled>未找到模型,请启动Sovits</option>';
                 agentTtsVoicePrimarySelect.innerHTML += disabledOption;
                 agentTtsVoiceSecondarySelect.innerHTML += disabledOption;
             }
         } catch (error) {
-            console.error('Failed to get Sovits TTS models:', error);
-            const errorOption = '<option value="" disabled>获取模型失败</option>';
+            console.error('Failed to get TTS models:', error);
+            const errorOption = isNetworkMode
+                ? '<option value="" disabled>获取网络音色失败</option>'
+                : '<option value="" disabled>获取模型失败</option>';
             agentTtsVoicePrimarySelect.innerHTML = errorOption;
             agentTtsVoiceSecondarySelect.innerHTML = errorOption;
-            uiHelper.showToastNotification('获取Sovits语音模型失败', 'error');
+            uiHelper.showToastNotification(isNetworkMode ? '获取网络音色失败' : '获取Sovits语音模型失败', 'error');
         }
     }
 
@@ -769,13 +827,16 @@ const settingsManager = (() => {
 
             if (refreshTtsModelsBtn) {
                 refreshTtsModelsBtn.addEventListener('click', async () => {
-                    uiHelper.showToastNotification('正在刷新语音模型...', 'info');
+                    const isNetworkMode = (window.globalSettings || {}).voiceMode === 'network';
+                    uiHelper.showToastNotification(isNetworkMode ? '正在刷新网络音色列表...' : '正在刷新语音模型...', 'info');
                     try {
-                        await electronAPI.sovitsGetModels(true); // force refresh
-                        await populateTtsModels(agentTtsVoicePrimarySelect.value, agentTtsVoiceSecondarySelect.value); // repopulate
-                        uiHelper.showToastNotification('语音模型列表已刷新', 'success');
+                        if (electronAPI.sovitsGetModels) {
+                            await electronAPI.sovitsGetModels(true);
+                        }
+                        await populateTtsModels(agentTtsVoicePrimarySelect.value, agentTtsVoiceSecondarySelect.value);
+                        uiHelper.showToastNotification(isNetworkMode ? '网络音色列表已刷新' : '语音模型列表已刷新', 'success');
                     } catch (e) {
-                        uiHelper.showToastNotification('刷新语音模型失败', 'error');
+                        uiHelper.showToastNotification(isNetworkMode ? '刷新网络音色失败' : '刷新语音模型失败', 'error');
                     }
                 });
             }
@@ -1200,10 +1261,41 @@ const settingsManager = (() => {
     /**
      * Handles the refresh models button click.
      */
-    function handleRefreshModels() {
-        if (electronAPI.refreshModels) {
-            electronAPI.refreshModels();
-            uiHelper.showToastNotification('正在刷新模型列表...', 'info');
+    async function handleRefreshModels() {
+        if (!electronAPI.refreshModels) {
+            uiHelper.showToastNotification('当前环境不支持刷新模型列表', 'error');
+            return;
+        }
+
+        uiHelper.showToastNotification('正在刷新模型列表...', 'info');
+
+        try {
+            const result = await electronAPI.refreshModels();
+            const models = Array.isArray(result?.models) ? result.models : await electronAPI.getCachedModels();
+
+            let hotModelIds = [];
+            let favoriteModelIds = [];
+            try {
+                if (electronAPI.getHotModels) {
+                    hotModelIds = await electronAPI.getHotModels();
+                }
+                if (electronAPI.getFavoriteModels) {
+                    favoriteModelIds = await electronAPI.getFavoriteModels();
+                }
+            } catch (e) {
+                console.warn('[SettingsManager] Failed to refresh model metadata:', e);
+            }
+
+            populateModelList(models, currentModelSelectCallback, hotModelIds, favoriteModelIds);
+
+            if (Array.isArray(models) && models.length > 0) {
+                uiHelper.showToastNotification(`模型列表已刷新，共 ${models.length} 个模型`, 'success');
+            } else {
+                uiHelper.showToastNotification('模型列表刷新完成，但服务器未返回可用模型', 'warning');
+            }
+        } catch (error) {
+            console.error('[SettingsManager] Failed to refresh models:', error);
+            uiHelper.showToastNotification(`刷新模型列表失败: ${error.message || error}`, 'error');
         }
     }
 
