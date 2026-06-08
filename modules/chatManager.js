@@ -37,6 +37,20 @@ window.chatManager = (() => {
 
 
 
+    function attachTimestampMetaToVcpMessage(vcpMessage, historyMessage) {
+        if (!vcpMessage || !historyMessage || !historyMessage.id || typeof historyMessage.timestamp !== 'number') {
+            return vcpMessage;
+        }
+        return {
+            ...vcpMessage,
+            __vcpchatTimestampMeta: {
+                messageId: historyMessage.id,
+                role: historyMessage.role,
+                timestamp: historyMessage.timestamp
+            }
+        };
+    }
+
     /**
      * 应用单个正则规则到文本
      * @param {string} text - 输入文本
@@ -117,6 +131,58 @@ window.chatManager = (() => {
         });
         
         return processedText;
+    }
+
+    /**
+     * 收集当前生效的 Tavern (VCPChatTarven) 规则
+     * @param {string} scope - 'agent' | 'group'
+     * @returns {Array} active rules
+     */
+    function getTavernRules(scope) {
+        const manager = window.TavernManager;
+        if (manager && typeof manager.getActiveRulesForScope === 'function') {
+            return manager.getActiveRulesForScope(scope) || [];
+        }
+        return [];
+    }
+
+    /**
+     * 把 user_suffix 规则的内容追加到给定文本尾部
+     * @param {string} text
+     * @param {Array} rules
+     * @returns {string}
+     */
+    function applyTavernUserSuffix(text, rules) {
+        const engine = window.TavernRulesEngine;
+        if (!engine || !Array.isArray(rules) || rules.length === 0) return text || '';
+        return engine.applyUserSuffix(text || '', rules, 'agent');
+    }
+
+    /**
+     * 把 system_suffix 规则的内容追加到系统提示词尾部
+     */
+    function applyTavernSystemSuffix(systemPromptContent, rules) {
+        const engine = window.TavernRulesEngine;
+        if (!engine || !Array.isArray(rules) || rules.length === 0) return systemPromptContent || '';
+        return engine.applySystemSuffix(systemPromptContent || '', rules, 'agent');
+    }
+
+    /**
+     * 把 context_inject 规则按 depth 插入到 VCP 消息数组中（不含 system）
+     * 用于单聊场景；message 的 content 使用 multimodal text 部分
+     */
+    function applyTavernContextInject(messagesForVCP, rules) {
+        const engine = window.TavernRulesEngine;
+        if (!engine || !Array.isArray(rules) || rules.length === 0) {
+            return messagesForVCP;
+        }
+        return engine.applyContextInject(messagesForVCP, rules, 'agent', {
+            makeMessage: (role, text) => ({
+                role,
+                content: [{ type: 'text', text }],
+                __tavernInjected: true
+            })
+        });
     }
 
     /**
@@ -965,6 +1031,9 @@ window.chatManager = (() => {
             const currentChatHistory = currentChatHistoryRef.get();
             const historySnapshotForVCP = currentChatHistory.filter(msg => msg.id !== thinkingMessage.id && !msg.isThinking);
 
+            // VCPChatTarven (高级回复) - 收集生效的规则
+            const tavernRules = getTavernRules('agent');
+
             const messagesForVCP = await Promise.all(historySnapshotForVCP.map(async msg => {
                 let vcpImageAttachmentsPayload = [];
                 let vcpAudioAttachmentsPayload = [];
@@ -1010,7 +1079,10 @@ window.chatManager = (() => {
                 if (msg.role === 'user' && msg.id === userMessage.id) {
                     // 关键修复：使用已经包含附件内容的 combinedTextContent
                     currentMessageTextContent = combinedTextContent;
-                    
+
+                    // VCPChatTarven: 在当前用户消息尾部追加 user_suffix 规则
+                    currentMessageTextContent = applyTavernUserSuffix(currentMessageTextContent, tavernRules);
+
                     // IMPORTANT: We need to handle Canvas placeholder WITHOUT overwriting the combined content
                     // First, check if we need to replace Canvas placeholder
                     if (currentMessageTextContent.includes(CANVAS_PLACEHOLDER)) {
@@ -1034,13 +1106,20 @@ window.chatManager = (() => {
                     for (const att of msg.attachments) {
                         const fileManagerData = att._fileManagerData || {};
                         // 优先使用 att.src，因为它代表前端的本地可访问路径
-                        // 后备为 internalPath（来自 fileManager），最后才是文件名
-                        const filePathForContext = att.src || (fileManagerData.internalPath ? fileManagerData.internalPath.replace('file://', '') : (att.name || '未知文件'));
+                        // 后备为 internalPath（来自 fileManager 或 att 顶层），最后才是文件名
+                        // 兼容两种附件结构：通过正常发送的附件（数据在 _fileManagerData 中）
+                        // 和通过 addAttachmentsToMessage 添加的附件（数据直接在 att 顶层）
+                        const effectiveInternalPath = fileManagerData.internalPath || att.internalPath;
+                        const filePathForContext = att.src || (effectiveInternalPath ? effectiveInternalPath.replace('file://', '') : (att.name || '未知文件'));
 
-                        if (fileManagerData.imageFrames && fileManagerData.imageFrames.length > 0) {
+                        // 兼容读取：优先从 _fileManagerData 读取，回退到 att 顶层字段
+                        const effectiveImageFrames = fileManagerData.imageFrames || att.imageFrames;
+                        const effectiveExtractedText = fileManagerData.extractedText || att.extractedText;
+
+                        if (effectiveImageFrames && effectiveImageFrames.length > 0) {
                              historicalAppendedText += `\n\n[附加文件: ${filePathForContext} (扫描版PDF，已转换为图片)]`;
-                        } else if (fileManagerData.extractedText) {
-                            historicalAppendedText += `\n\n[附加文件: ${filePathForContext}]\n${fileManagerData.extractedText}\n[/附加文件结束: ${att.name || '未知文件'}]`;
+                        } else if (effectiveExtractedText) {
+                            historicalAppendedText += `\n\n[附加文件: ${filePathForContext}]\n${effectiveExtractedText}\n[/附加文件结束: ${att.name || '未知文件'}]`;
                         } else {
                             // 对于没有提取文本的文件（如音视频），只附加路径
                             historicalAppendedText += `\n\n[附加文件: ${filePathForContext}]`;
@@ -1053,17 +1132,19 @@ window.chatManager = (() => {
                     // --- IMAGE PROCESSING ---
                     const imageAttachmentsPromises = msg.attachments.map(async att => {
                         const fileManagerData = att._fileManagerData || {};
+                        // 兼容读取：优先从 _fileManagerData 读取，回退到 att 顶层字段
+                        const effectiveImageFrames = fileManagerData.imageFrames || att.imageFrames;
                         // Case 1: Scanned PDF converted to image frames
-                        if (fileManagerData.imageFrames && fileManagerData.imageFrames.length > 0) {
-                            return fileManagerData.imageFrames.map(frameData => ({
+                        if (effectiveImageFrames && effectiveImageFrames.length > 0) {
+                            return effectiveImageFrames.map(frameData => ({
                                 type: 'image_url',
                                 image_url: { url: `data:image/jpeg;base64,${frameData}` }
                             }));
                         }
                         // Case 2: Regular image file (including GIFs that get framed)
-                        if (att.type.startsWith('image/')) {
+                        if (att.type && att.type.startsWith('image/')) {
                             try {
-                                const result = await electronAPI.getFileAsBase64(att.src);
+                                const result = await electronAPI.getFileAsBase64(att.src || att.internalPath);
                                 if (result && result.success) {
                                     return result.base64Frames.map(frameData => ({
                                         type: 'image_url',
@@ -1091,10 +1172,10 @@ window.chatManager = (() => {
                     // --- AUDIO PROCESSING ---
                     const supportedAudioTypes = ['audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/aiff', 'audio/aac', 'audio/ogg', 'audio/flac'];
                     const audioAttachmentsPromises = msg.attachments
-                        .filter(att => supportedAudioTypes.includes(att.type))
+                        .filter(att => att.type && supportedAudioTypes.includes(att.type))
                         .map(async att => {
                             try {
-                                const result = await electronAPI.getFileAsBase64(att.src);
+                                const result = await electronAPI.getFileAsBase64(att.src || att.internalPath);
                                 if (result && result.success) {
                                     return result.base64Frames.map(frameData => ({
                                         type: 'image_url',
@@ -1117,10 +1198,10 @@ window.chatManager = (() => {
 
                     // --- VIDEO PROCESSING ---
                     const videoAttachmentsPromises = msg.attachments
-                        .filter(att => att.type.startsWith('video/'))
+                        .filter(att => att.type && att.type.startsWith('video/'))
                         .map(async att => {
                             try {
-                                const result = await electronAPI.getFileAsBase64(att.src);
+                                const result = await electronAPI.getFileAsBase64(att.src || att.internalPath);
                                 if (result && result.success) {
                                     return result.base64Frames.map(frameData => ({
                                         type: 'image_url',
@@ -1154,7 +1235,10 @@ window.chatManager = (() => {
                      finalContentPartsForVCP.push({ type: 'text', text: '(用户发送了附件，但无文本或图片内容)' });
                 }
                 
-                return { role: msg.role, content: finalContentPartsForVCP.length > 0 ? finalContentPartsForVCP : msg.content };
+                return attachTimestampMetaToVcpMessage(
+                    { role: msg.role, content: finalContentPartsForVCP.length > 0 ? finalContentPartsForVCP : msg.content },
+                    msg
+                );
             }));
 
             if (agentConfig && agentConfig.systemPrompt) {
@@ -1183,7 +1267,26 @@ window.chatManager = (() => {
                     systemPromptContent = prependedContent.join('\n') + '\n\n' + systemPromptContent;
                 }
 
+                // VCPChatTarven: 在系统提示词尾部追加 system_suffix 规则
+                systemPromptContent = applyTavernSystemSuffix(systemPromptContent, tavernRules);
+
                 messagesForVCP.unshift({ role: 'system', content: systemPromptContent });
+            } else {
+                // 没有 systemPrompt，但仍可能存在 system_suffix 规则
+                const tavernSysOnly = applyTavernSystemSuffix('', tavernRules);
+                if (tavernSysOnly && tavernSysOnly.trim()) {
+                    messagesForVCP.unshift({ role: 'system', content: tavernSysOnly });
+                }
+            }
+
+            // VCPChatTarven: 应用 context_inject 规则（按深度插入消息）
+            // 注意：只对非 system 消息计算深度，因此先临时分离 system
+            if (Array.isArray(tavernRules) && tavernRules.some(r => r.type === 'context_inject' && r.enabled !== false)) {
+                const systemMsgs = messagesForVCP.filter(m => m.role === 'system');
+                const nonSystemMsgs = messagesForVCP.filter(m => m.role !== 'system');
+                const injected = applyTavernContextInject(nonSystemMsgs, tavernRules);
+                messagesForVCP.length = 0;
+                messagesForVCP.push(...systemMsgs, ...injected);
             }
 
             const useStreaming = (agentConfig && agentConfig.streamOutput !== undefined) ? (agentConfig.streamOutput === true || agentConfig.streamOutput === 'true') : true;

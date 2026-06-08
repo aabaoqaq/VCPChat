@@ -253,7 +253,7 @@
     -webkit-background-clip: text !important;
     background-clip: text !important;
     -webkit-text-fill-color: transparent !important;
-    text-fill-color: transparent !important;
+    color: transparent !important;
     font-style: normal !important;
     font-weight: bold !important;
     padding: 1px 3px !important;
@@ -301,8 +301,8 @@
     border: 1px solid #eaddd0;
     /* A soft, paper-like border */
     border-radius: 8px !important;
-    padding: 12px 18px 15px 48px !important;
-    /* Adjusted padding for new icon placement */
+    padding: 12px 18px 15px 18px !important;
+    /* Compact padding; icon is now inline with the title */
     color: #5d4037 !important;
     /* A warm, dark brown for text */
     box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
@@ -332,19 +332,9 @@
     margin-bottom: 0;
 }
 
-/* The decorative icon on the top left, changed to a quill */
+/* Decorative quill icon moved inline with the diary title */
 .maid-diary-bubble::before {
-    content: "✒️";
-    position: absolute;
-    top: 14px;
-    left: 16px;
-    font-size: 22px;
-    opacity: 0.6;
-    z-index: 2;
-    transform: rotate(-15deg);
-    /* Tilted for a more dynamic look */
-    animation: none !important;
-    /* Removing previous animation for a more static, elegant feel */
+    display: none !important;
 }
 
 /* Removing the animated border for a cleaner look */
@@ -365,11 +355,23 @@
 
 /* "Maid's Diary" title */
 .diary-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     font-weight: bold;
     font-size: 1.1em;
     color: #6d4c41;
     /* A rich, brownish color */
     font-family: var(--vcp-diary-font-family, 'Georgia', 'Times New Roman', serif) !important;
+}
+
+.diary-title::before {
+    content: "✒️";
+    display: inline-block;
+    font-size: 1.15em;
+    line-height: 1;
+    opacity: 0.6;
+    transform: rotate(-15deg);
 }
 
 /* Date on the top right */
@@ -387,16 +389,23 @@
     color: #8d6e63;
 }
 
-.diary-maid-label {
+.diary-maid-label,
+.diary-folder-label {
     font-weight: bold;
 }
 
-.diary-maid-name {
+.diary-maid-name,
+.diary-folder-name {
     font-style: italic;
     color: #a1887f;
     background: rgba(161, 136, 127, 0.08);
     padding: 1px 5px;
     border-radius: 4px;
+}
+
+.diary-meta-separator {
+    color: #bcaaa4;
+    opacity: 0.75;
 }
 
 /* The main content of the diary entry */
@@ -412,6 +421,155 @@
 /* Hide copy button as it's not a code block */
 .maid-diary-bubble>.code-copy {
     display: none !important;
+}
+
+/* --- Maid Diary Update Bubble --- */
+.maid-diary-update-bubble {
+    display: block !important;
+    background: #fffdf9 !important;
+    border: 1px solid #e4d7c8;
+    border-radius: 8px !important;
+    padding: 12px 14px !important;
+    color: #4e342e !important;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
+    margin-top: 10px !important;
+    margin-bottom: 12px !important;
+    font-family: var(--vcp-diary-font-family, 'Georgia', 'Times New Roman', serif) !important;
+    font-size: 0.95em !important;
+    line-height: 1.65;
+    box-sizing: border-box;
+}
+
+.diary-update-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid #d7ccc8;
+    padding-bottom: 6px;
+    margin-bottom: 10px;
+}
+
+.diary-update-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    color: #6d4c41;
+}
+
+.diary-update-title::before {
+    content: "✏️";
+    font-size: 1.05em;
+    opacity: 0.75;
+}
+
+.diary-update-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    font-size: 0.9em;
+    color: #8d6e63;
+}
+
+.diary-update-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.diary-update-side {
+    min-width: 0;
+    border-radius: 7px;
+    padding: 9px 11px;
+    border: 1px solid rgba(141, 110, 99, 0.18);
+    background: rgba(161, 136, 127, 0.06);
+}
+
+.diary-update-before {
+    border-left: 3px solid #bcaaa4;
+}
+
+.diary-update-after {
+    border-left: 3px solid #81c784;
+    background: rgba(129, 199, 132, 0.08);
+}
+
+.diary-update-label {
+    display: inline-block;
+    font-weight: 700;
+    font-size: 0.82em;
+    letter-spacing: 0.08em;
+    color: #8d6e63;
+    margin-bottom: 5px;
+}
+
+.diary-update-content {
+    color: #4e342e;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.diary-update-content>p:first-child {
+    margin-top: 0;
+}
+
+.diary-update-content>p:last-child {
+    margin-bottom: 0;
+}
+
+.diary-update-arrow {
+    align-self: center;
+    color: #a1887f;
+    font-weight: 700;
+    opacity: 0.9;
+    transform: rotate(90deg);
+    line-height: 1;
+    margin: -1px 0;
+}
+
+body:not(.light-theme) .maid-diary-update-bubble {
+    background: #2c2a3a !important;
+    border-color: #4a485f;
+    color: #d8d2c9 !important;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+
+body:not(.light-theme) .diary-update-header {
+    border-bottom-color: #4a485f;
+}
+
+body:not(.light-theme) .diary-update-title {
+    color: #ffb74d;
+}
+
+body:not(.light-theme) .diary-update-meta {
+    color: #b0bec5;
+}
+
+body:not(.light-theme) .diary-update-side {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+body:not(.light-theme) .diary-update-before {
+    border-left-color: #7f7f90;
+}
+
+body:not(.light-theme) .diary-update-after {
+    border-left-color: #66bb6a;
+    background: rgba(102, 187, 106, 0.08);
+}
+
+body:not(.light-theme) .diary-update-label,
+body:not(.light-theme) .diary-update-arrow {
+    color: #a0a0b0;
+}
+
+body:not(.light-theme) .diary-update-content {
+    color: #c5c8c6;
 }
 
 /* --- Maid Diary Dark Theme Overrides --- */
@@ -442,10 +600,15 @@ body:not(.light-theme) .diary-maid-info {
     color: #b0bec5;
 }
 
-body:not(.light-theme) .diary-maid-name {
+body:not(.light-theme) .diary-maid-name,
+body:not(.light-theme) .diary-folder-name {
     color: #ffcc80;
     /* Lighter shade of the title color */
     background: rgba(255, 183, 77, 0.1);
+}
+
+body:not(.light-theme) .diary-meta-separator {
+    color: #7f7f90;
 }
 
 body:not(.light-theme) .diary-content {
@@ -777,11 +940,11 @@ body.light-theme {
     color: var(--table-header-text-color);
 }
 
-/* Optional: Re-enable for alternating rows if desired for both themes */
+/* Optional: Re-enable for alternating rows if desired for both themes:
 .md-content tr:nth-child(even) td {
-    /* background-color: var(--table-row-even-bg-color); */
-    /* Commented out for now, can be enabled */
+    background-color: var(--table-row-even-bg-color);
 }
+*/
 
 .md-content tr:hover td {
     background-color: var(--table-row-hover-bg-color);
@@ -828,9 +991,9 @@ body.light-theme {
     font-family: var(--vcp-tool-card-font-family, var(--vcp-chat-font-family, 'Segoe UI', 'Roboto', sans-serif)) !important;
     font-size: 0.95em !important;
     line-height: 1.6;
-    width: -moz-fit-content;
-    width: fit-content;
+    width: 100%;
     max-width: 95%;
+    box-sizing: border-box;
     transition: background 0.3s, color 0.3s, border-color 0.3s, box-shadow 0.3s;
     /* Add transition for smooth theme change */
     will-change: transform;
@@ -950,6 +1113,7 @@ body.light-theme .vcp-tool-result-status:containing("SUCCESS") {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
+    min-width: 0;
 }
 
 .vcp-tool-result-item-key {
@@ -961,7 +1125,44 @@ body.light-theme .vcp-tool-result-status:containing("SUCCESS") {
 
 .vcp-tool-result-item-value {
     color: var(--tool-result-item-value-color);
+    min-width: 0;
+    max-width: 100%;
     word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.message-item .md-content.contains-vcp-tool-result {
+    width: var(--chat-bubble-max-width, 82%);
+    max-width: var(--chat-bubble-max-width, 82%);
+    box-sizing: border-box;
+}
+
+.main-content.notifications-sidebar-active .message-item .md-content.contains-vcp-tool-result {
+    width: var(--chat-bubble-max-width-notifications, 90%);
+    max-width: var(--chat-bubble-max-width-notifications, 90%);
+}
+
+body.chat-wide-layout .message-item .md-content.contains-vcp-tool-result {
+    width: var(--chat-bubble-max-width-wide, 92%);
+    max-width: var(--chat-bubble-max-width-wide, 92%);
+}
+
+body.chat-wide-layout .main-content.notifications-sidebar-active .message-item .md-content.contains-vcp-tool-result {
+    width: var(--chat-bubble-max-width-wide-notifications, 96%);
+    max-width: var(--chat-bubble-max-width-wide-notifications, 96%);
+}
+
+.vcp-tool-result-item-markdown {
+    flex-direction: column;
+}
+
+.vcp-tool-result-item-markdown .vcp-tool-result-item-key {
+    margin-right: 0;
+    margin-bottom: 4px;
+}
+
+.vcp-tool-result-item-markdown .vcp-tool-result-item-value {
+    width: 100%;
 }
 
 .vcp-tool-result-bubble pre,
@@ -992,12 +1193,21 @@ body:not(.light-theme) .vcp-tool-result-raw-content {
 
 /* 🟢 工具结果 Markdown 渲染内容容器（架构级修复：独立渲染，支持表格/代码块） */
 .vcp-tool-result-markdown-content {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     margin: 4px 0;
     padding: 4px 0;
     max-height: 500px;
+    overflow-x: auto;
     overflow-y: auto;
     scrollbar-width: thin;
-    word-break: break-word;
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: anywhere;
+    line-break: anywhere;
 }
 
 .vcp-tool-result-markdown-content pre {
@@ -1015,6 +1225,44 @@ body:not(.light-theme) .vcp-tool-result-markdown-content pre {
     background: rgba(255, 255, 255, 0.04);
 }
 
+.vcp-tool-result-markdown-content *,
+.vcp-tool-result-footer *,
+.vcp-tool-result-raw-content {
+    max-width: 100%;
+    min-width: 0;
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: anywhere;
+    line-break: anywhere;
+}
+
+.vcp-tool-result-markdown-content p,
+.vcp-tool-result-markdown-content li,
+.vcp-tool-result-markdown-content h1,
+.vcp-tool-result-markdown-content h2,
+.vcp-tool-result-markdown-content h3,
+.vcp-tool-result-markdown-content h4,
+.vcp-tool-result-markdown-content h5,
+.vcp-tool-result-markdown-content h6 {
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: anywhere;
+    line-break: anywhere;
+}
+
+.vcp-tool-result-markdown-content a,
+.vcp-tool-result-footer a,
+.vcp-tool-result-item-value a {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+.vcp-tool-result-markdown-content ul,
+.vcp-tool-result-markdown-content ol {
+    padding-left: 1.3em;
+    margin-left: 0;
+}
+
 .vcp-tool-result-markdown-content > p:first-child { margin-top: 0; }
 .vcp-tool-result-markdown-content > p:last-child { margin-bottom: 0; }
 
@@ -1030,10 +1278,15 @@ body:not(.light-theme) .vcp-tool-result-markdown-content pre {
 }
 
 .vcp-tool-result-bubble table {
+    display: block;
     margin: 0.5em 0;
     border-color: var(--tool-result-border-color);
     background-color: rgba(0, 0, 0, 0.05);
     width: 100%;
+    max-width: 100%;
+    table-layout: fixed;
+    overflow-x: auto;
+    white-space: normal;
 }
 
 body:not(.light-theme) .vcp-tool-result-bubble table {
@@ -1044,6 +1297,11 @@ body:not(.light-theme) .vcp-tool-result-bubble table {
 .vcp-tool-result-bubble td {
     border-color: var(--tool-result-border-color);
     padding: 6px 10px;
+    max-width: 28em;
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: anywhere;
+    line-break: anywhere;
 }
 
 .vcp-tool-result-bubble th {
@@ -1099,7 +1357,8 @@ body:not(.light-theme) .vcp-tool-result-bubble th {
 .vcp-tool-result-collapsible-content {
     max-height: 0;
     opacity: 0;
-    overflow-x: hidden;
+    min-width: 0;
+    overflow-x: auto;
     overflow-y: auto;
     /* Enable vertical scrolling */
     transition: max-height 0.5s ease-in-out, opacity 0.4s ease-in-out, margin-top 0.5s ease-in-out;
@@ -1107,6 +1366,8 @@ body:not(.light-theme) .vcp-tool-result-bubble th {
     scrollbar-width: thin;
     /* Firefox */
     scrollbar-color: var(--tool-result-item-key-color) transparent;
+    /* 🟢 性能优化：折叠态跳过布局和绘制，解决大文本导致滚动卡顿 */
+    content-visibility: hidden;
 }
 
 /* Custom scrollbar for Webkit */
@@ -1130,6 +1391,47 @@ body:not(.light-theme) .vcp-tool-result-bubble th {
     opacity: 1;
     margin-top: 10px;
     /* Add space when expanded */
+    /* 🟢 展开时恢复正常渲染 */
+    content-visibility: visible;
+}
+
+/* 🟢 二级展开：大内容截断后的"展开全部"按钮 */
+.vcp-tool-result-truncated-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding: 8px 16px;
+    background: rgba(100, 210, 255, 0.08);
+    border: 1px dashed rgba(100, 210, 255, 0.3);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.88em;
+    color: var(--tool-result-name-color);
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+    user-select: none;
+}
+
+.vcp-tool-result-truncated-notice:hover {
+    background: rgba(100, 210, 255, 0.15);
+    border-color: rgba(100, 210, 255, 0.5);
+    transform: translateY(-1px);
+}
+
+.vcp-tool-result-truncated-notice:active {
+    transform: translateY(0);
+}
+
+body.light-theme .vcp-tool-result-truncated-notice {
+    background: rgba(2, 119, 189, 0.06);
+    border-color: rgba(2, 119, 189, 0.2);
+    color: var(--tool-result-name-color);
+}
+
+body.light-theme .vcp-tool-result-truncated-notice:hover {
+    background: rgba(2, 119, 189, 0.12);
+    border-color: rgba(2, 119, 189, 0.4);
 }
 
 /* --- User Clicked Button Bubble --- */
