@@ -6,9 +6,9 @@ import { createContentPipeline, PIPELINE_MODES } from './contentPipeline.js';
 const streamingChunkQueues = new Map(); // messageId -> array of original chunk strings
 const streamingTimers = new Map();      // messageId -> intervalId
 const accumulatedStreamText = new Map(); // messageId -> string
-const streamSegmentStates = new Map(); // messageId -> { stableCutoff, stableHtml, lastTailText }
+const streamSegmentStates = new Map(); // messageId -> { stableCutoff, stableHtml, stableRenderedCutoff, stableBlocks, stableBlockSeq, lastTailText, lastParagraphBoundary }
 let activeStreamingMessageId = null; // Track the currently active streaming message
-const elementContentLengthCache = new Map(); // 跟踪每个元素的内容长度
+const elementContentLengthCache = new WeakMap(); // 跟踪每个元素的内容长度；WeakMap 避免 morphdom 替换节点后的强引用泄漏
 
 // --- VCPdesktop 流式推送状态 ---
 const desktopPushStates = new Map(); // messageId -> { active, widgetId, buffer, tagBuffer, created, pushTimer, lastPushedLength, lastTokenTime, validated }
@@ -23,9 +23,37 @@ const TOOL_REQUEST_START = '<<<[TOOL_REQUEST]>>>';
 const TOOL_REQUEST_END = '<<<[END_TOOL_REQUEST]>>>';
 const TOOL_RESULT_START = '[[VCP调用结果信息汇总:';
 const TOOL_RESULT_END = 'VCP调用结果结束]]';
+const TOOL_CALL_SUMMARY_START = '[本轮工具调用摘要:]';
+const TOOL_CALL_SUMMARY_END = '[本轮工具调用摘要结束]';
+const ROLE_DIVIDER_REGEX = /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
 const DESKTOP_PUSH_START = '<<<[DESKTOP_PUSH]>>>';
 const DESKTOP_PUSH_END = '<<<[DESKTOP_PUSH_END]>>>';
 const CODE_FENCE = '```';
+const THOUGHT_CHAIN_START = '[--- VCP元思考链';
+const THOUGHT_CHAIN_END = '[--- 元思考链结束 ---]';
+const THINK_START_REGEX = /<think(?:ing)?>/ig;
+const THINK_END_REGEX = /<\/think(?:ing)?>/ig;
+const DAILY_NOTE_START = '<<<DailyNoteStart>>>';
+const DAILY_NOTE_END = '<<<DailyNoteEnd>>>';
+// OpenHerPersona 聊天分条标记：完整出现即成为稳定切点，流式过程中实时分出气泡
+const BURST_MARKER_TOKEN = '<!--brk-->';
+const MARKDOWN_SECTION_BREAK_TOKEN = '---';
+const STREAM_PARAGRAPH_SAFETY_BLOCKS = 1;
+const HTML_ISLAND_MAX_STACK_DEPTH = 128;
+const HTML_ISLAND_MAX_CHARS = 256 * 1024;
+const HTML_RAWTEXT_TAGS = new Set(['script', 'style']);
+const HTML_VOID_TAGS = new Set([
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+    'link', 'meta', 'param', 'source', 'track', 'wbr'
+]);
+const HTML_ISLAND_STACK_TAGS = new Set([
+    'a', 'article', 'aside', 'b', 'blockquote', 'button', 'canvas', 'code',
+    'defs', 'div', 'em', 'figcaption', 'figure', 'filter', 'footer', 'form',
+    'g', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'i', 'label', 'li',
+    'lineargradient', 'main', 'nav', 'ol', 'p', 'path', 'pre', 'radialgradient',
+    'section', 'select', 'span', 'strong', 'svg', 'table', 'tbody', 'td',
+    'textarea', 'th', 'thead', 'tr', 'ul', ...HTML_RAWTEXT_TAGS
+]);
 
 const STREAM_BLOCK_TAG_REGEX = /^(P|DIV|UL|OL|LI|PRE|BLOCKQUOTE|H[1-6]|TABLE|TR|FIGURE)$/;
 const STREAM_PRESERVED_BLOCK_CLASSES = [
@@ -126,6 +154,7 @@ const SCROLL_THROTTLE_MS = 100; // 100ms 节流
 const viewContextCache = new Map(); // messageId -> boolean (是否为当前视图)
 let currentViewSignature = null; // 当前视图的签名
 let globalRenderLoopRunning = false;
+const pendingDirectRenderMessages = new Set(); // 非平滑流式：chunk 到达只置脏，由全局 rAF 合帧渲染
 
 // 记录延迟清理定时器，方便切换话题时统一清除
 const delayedCleanupTimers = new Map(); // messageId -> timerId
@@ -141,6 +170,7 @@ const messageContextMap = new Map(); // messageId -> {agentId, groupId, topicId,
 // --- Local Reference Store ---
 let refs = {};
 let contentPipeline = null;
+let transientCleanupRegistered = false;
 
 // --- Pre-compiled Regular Expressions for Performance ---
 
@@ -150,6 +180,13 @@ let contentPipeline = null;
  */
 export function initStreamManager(dependencies) {
     refs = dependencies;
+
+    // App 级兜底扫帚：页面卸载时释放孤儿流的预缓冲、上下文映射、桌面推送 interval 等 transient 状态。
+    // 不挂到 clearChat，避免切换话题时误伤同窗口内其他 agent 的后台流式聊天。
+    if (!transientCleanupRegistered) {
+        window.addEventListener('beforeunload', cleanupTransientState);
+        transientCleanupRegistered = true;
+    }
 
     contentPipeline = createContentPipeline({
         fixEmoticonUrlsInMarkdown: (text) => {
@@ -329,8 +366,8 @@ async function saveHistoryForContext(context, history) {
 }
 
 /**
- * 批量应用流式渲染所需的轻量级预处理
- * 通过统一流水线维持与完整渲染一致的顺序协议。
+ * 批量应用流式渲染所需的轻量级预处理。
+ * P0-1 后仅作为 parseTail 缺失时的兜底；正常路径由 messageRenderer 注入的 parseTail 统一处理。
  */
 function applyStreamingPreprocessors(text) {
     if (!text) return '';
@@ -341,34 +378,269 @@ function applyStreamingPreprocessors(text) {
     }).text;
 }
 
+function parseStreamTail(text) {
+    if (typeof refs.parseTail === 'function') {
+        return refs.parseTail(text);
+    }
+
+    const processedText = applyStreamingPreprocessors(text);
+    return refs.markedInstance?.parse ? refs.markedInstance.parse(processedText) : processedText;
+}
+
+function parseFullStreamContent(text, options = {}) {
+    if (typeof refs.parseFull === 'function') {
+        return refs.parseFull(text, options);
+    }
+
+    return refs.markedInstance?.parse ? refs.markedInstance.parse(text) : text;
+}
+
 function ensureStreamingRoots(contentDiv) {
     let stableRoot = contentDiv.querySelector('.vcp-stream-stable-root');
+    let stableBlocksRoot = contentDiv.querySelector('.vcp-stream-stable-blocks-root');
     let tailRoot = contentDiv.querySelector('.vcp-stream-tail-root');
 
     if (!stableRoot || !tailRoot) {
         contentDiv.innerHTML = '';
         stableRoot = document.createElement('div');
         stableRoot.className = 'vcp-stream-stable-root';
+        stableBlocksRoot = document.createElement('div');
+        stableBlocksRoot.className = 'vcp-stream-stable-blocks-root';
+        stableRoot.appendChild(stableBlocksRoot);
         tailRoot = document.createElement('div');
         tailRoot.className = 'vcp-stream-tail-root';
         contentDiv.appendChild(stableRoot);
         contentDiv.appendChild(tailRoot);
+    } else if (!stableBlocksRoot) {
+        // 兼容旧的 stableRoot 结构：后续追加式固化只写入 stableBlocksRoot。
+        // 如果 stableRoot 已有旧内容，先原样搬入 blocksRoot，避免切换实现时丢失已渲染 DOM。
+        stableBlocksRoot = document.createElement('div');
+        stableBlocksRoot.className = 'vcp-stream-stable-blocks-root';
+        while (stableRoot.firstChild) {
+            stableBlocksRoot.appendChild(stableRoot.firstChild);
+        }
+        stableRoot.appendChild(stableBlocksRoot);
     }
 
-    return { stableRoot, tailRoot };
+    return { stableRoot, stableBlocksRoot, tailRoot };
 }
 
 function getOrCreateStreamSegmentState(messageId) {
     let state = streamSegmentStates.get(messageId);
     if (!state) {
         state = {
+            // 已判定为稳定的源码前缀终点；tail 从这里开始渲染。
             stableCutoff: 0,
+            // 兼容旧路径/调试用：记录最近一次稳定 HTML 片段或前缀。
             stableHtml: '',
-            lastTailText: ''
+            // 已实际追加固化到 stableBlocksRoot 的源码终点。
+            // 下一步切换为追加式固化时，只渲染 [stableRenderedCutoff, stableCutoff)。
+            stableRenderedCutoff: 0,
+            // 追加式 stable block 元数据：{ id, start, end, source, html, element }。
+            stableBlocks: [],
+            stableBlockSeq: 0,
+            lastTailText: '',
+            lastParagraphBoundary: 0,
+            burstBubbleCount: 0
         };
         streamSegmentStates.set(messageId, state);
     }
     return state;
+}
+
+function createStableBlockRecord(segmentState, start, end, source, html, element = null) {
+    const id = `stream-stable-block-${segmentState.stableBlockSeq++}`;
+    return {
+        id,
+        start,
+        end,
+        source,
+        html,
+        element
+    };
+}
+
+function resetStableBlockState(segmentState) {
+    segmentState.stableRenderedCutoff = 0;
+    segmentState.stableBlocks = [];
+    segmentState.stableBlockSeq = 0;
+    segmentState.stableHtml = '';
+}
+
+function appendStableBlockFragment(stableBlocksRoot, segmentState, sourceText, html, options = {}) {
+    if (!stableBlocksRoot || !sourceText) return null;
+
+    const {
+        messageId = null,
+        settings = null
+    } = options;
+
+    const blockEl = document.createElement('div');
+    const blockRecord = createStableBlockRecord(
+        segmentState,
+        segmentState.stableRenderedCutoff,
+        segmentState.stableRenderedCutoff + sourceText.length,
+        sourceText,
+        html,
+        blockEl
+    );
+
+    blockEl.className = 'vcp-stream-stable-block';
+    blockEl.dataset.vcpStreamStableBlock = 'true';
+    blockEl.dataset.vcpBlockKey = blockRecord.id;
+    blockEl.dataset.vcpStableStart = String(blockRecord.start);
+    blockEl.dataset.vcpStableEnd = String(blockRecord.end);
+
+    stableBlocksRoot.appendChild(blockEl);
+    segmentState.stableBlocks.push(blockRecord);
+    segmentState.stableRenderedCutoff = blockRecord.end;
+    segmentState.stableHtml += html || '';
+
+    if (typeof refs.renderPostProcessedHtml === 'function') {
+        const enrichResult = refs.renderPostProcessedHtml(blockEl, html, {
+            messageId,
+            settings,
+            renderSessionId: null,
+            runHeavy: true,
+            includeAttachments: false
+        });
+        if (enrichResult && typeof enrichResult.catch === 'function') {
+            enrichResult.catch(error => console.error('[StreamManager] Stable block enrichment failed:', error));
+        }
+    } else {
+        blockEl.innerHTML = html;
+    }
+
+    return blockRecord;
+}
+
+function appendNewStableRange(stableBlocksRoot, segmentState, textForRendering, nextStableCutoff, options = {}) {
+    if (nextStableCutoff <= segmentState.stableRenderedCutoff) return [];
+
+    // 如果外部状态异常回退，宁可重置追加缓存，也不要产生重叠 block。
+    if (segmentState.stableRenderedCutoff > nextStableCutoff) {
+        stableBlocksRoot.textContent = '';
+        resetStableBlockState(segmentState);
+    }
+
+    const appendedBlocks = [];
+
+    while (segmentState.stableRenderedCutoff < nextStableCutoff) {
+        const currentOffset = segmentState.stableRenderedCutoff;
+        const markerIndex = findNextLineOnlyToken(textForRendering, BURST_MARKER_TOKEN, currentOffset);
+        const effectiveMarkerIndex = markerIndex !== -1 && markerIndex < nextStableCutoff ? markerIndex : -1;
+        const sliceEnd = effectiveMarkerIndex === -1 ? nextStableCutoff : effectiveMarkerIndex;
+        const sourceText = textForRendering.slice(currentOffset, sliceEnd);
+
+        if (sourceText) {
+            const html = parseFullStreamContent(sourceText);
+            const blockRecord = appendStableBlockFragment(stableBlocksRoot, segmentState, sourceText, html, options);
+            if (blockRecord) appendedBlocks.push(blockRecord);
+        }
+
+        if (effectiveMarkerIndex === -1) {
+            break;
+        }
+
+        // 独立行 <!--brk--> 作为稳定切点和气泡边界参与源码进度，
+        // 但不渲染进 stable block，避免后续为了分条再解包/搬运已稳定 DOM。
+        segmentState.stableRenderedCutoff = effectiveMarkerIndex + BURST_MARKER_TOKEN.length;
+    }
+
+    return appendedBlocks;
+}
+
+function unwrapStableBlockContainersForBurst(stableBlocksRoot, segmentState) {
+    if (!stableBlocksRoot) return;
+
+    const blockEls = Array.from(stableBlocksRoot.querySelectorAll(':scope > .vcp-stream-stable-block'));
+    if (blockEls.length === 0) return;
+
+    for (const blockEl of blockEls) {
+        const parent = blockEl.parentNode;
+        if (!parent) continue;
+
+        while (blockEl.firstChild) {
+            parent.insertBefore(blockEl.firstChild, blockEl);
+        }
+        blockEl.remove();
+    }
+
+    // burst 分条会重排 stable DOM；后续 stable block 继续追加即可，旧 block 元数据不再依赖 element 引用。
+    for (const block of segmentState.stableBlocks) {
+        block.element = null;
+    }
+}
+
+// 分条流式时给尾部根（"正在打字"的下一条）套上头像行，看起来像新消息正在到来。
+// 收尾阶段会整体重渲染 contentDiv，包装行随之消失。
+function ensureBurstTailRow(contentDiv, tailRoot, messageItem) {
+    if (contentDiv.querySelector('.burst-tail-row')) return;
+    const avatar = messageItem ? messageItem.querySelector('img.chat-avatar') : null;
+    const tailRow = document.createElement('div');
+    tailRow.className = 'burst-row burst-tail-row';
+    if (avatar && avatar.src) {
+        const tailAvatar = document.createElement('img');
+        tailAvatar.className = 'burst-avatar';
+        tailAvatar.src = avatar.src;
+        tailAvatar.alt = '';
+        tailRow.appendChild(tailAvatar);
+    }
+    contentDiv.appendChild(tailRow);
+    tailRow.appendChild(tailRoot);
+}
+
+function createBurstAvatarForMessage(messageItem) {
+    const avatar = messageItem ? messageItem.querySelector('img.chat-avatar') : null;
+    if (!avatar || !avatar.src) return null;
+
+    const burstAvatar = document.createElement('img');
+    burstAvatar.className = 'burst-avatar';
+    burstAvatar.src = avatar.src;
+    burstAvatar.alt = '';
+    return burstAvatar;
+}
+
+function promoteStableBlocksToBurstBubbles(stableBlocksRoot, messageItem) {
+    if (!stableBlocksRoot) return [];
+
+    const wrappers = [];
+    const children = Array.from(stableBlocksRoot.children);
+    let existingBubbleCount = 0;
+
+    for (const child of children) {
+        if (child.classList.contains('burst-row') || child.classList.contains('burst-bubble')) {
+            existingBubbleCount += 1;
+            wrappers.push(child);
+        }
+    }
+
+    const blockEls = children.filter((child) => (
+        child.classList.contains('vcp-stream-stable-block')
+        && child.dataset.vcpBurstWrapped !== 'true'
+    ));
+
+    for (const blockEl of blockEls) {
+        blockEl.dataset.vcpBurstWrapped = 'true';
+        blockEl.classList.add('burst-bubble');
+
+        if (existingBubbleCount === 0) {
+            wrappers.push(blockEl);
+            existingBubbleCount += 1;
+            continue;
+        }
+
+        const row = document.createElement('div');
+        row.className = 'burst-row';
+        const burstAvatar = createBurstAvatarForMessage(messageItem);
+        if (burstAvatar) row.appendChild(burstAvatar);
+        stableBlocksRoot.insertBefore(row, blockEl);
+        row.appendChild(blockEl);
+        wrappers.push(row);
+        existingBubbleCount += 1;
+    }
+
+    return wrappers;
 }
 
 function startsWithAt(text, index, token) {
@@ -397,47 +669,517 @@ function findMatchingFenceEnd(text, startIndex) {
     return -1;
 }
 
+function isLineOnlyToken(text, tokenStart, tokenLength) {
+    const lineStart = tokenStart === 0 ? 0 : text.lastIndexOf('\n', tokenStart - 1) + 1;
+    const lineEndIndex = text.indexOf('\n', tokenStart + tokenLength);
+    const lineEnd = lineEndIndex === -1 ? text.length : lineEndIndex;
+    const before = text.slice(lineStart, tokenStart);
+    const after = text.slice(tokenStart + tokenLength, lineEnd);
+
+    return before.trim() === '' && after.trim() === '';
+}
+
+function findNextLineOnlyToken(text, token, startOffset = 0) {
+    let index = Math.max(0, startOffset);
+    while (index < text.length) {
+        const tokenIndex = text.indexOf(token, index);
+        if (tokenIndex === -1) return -1;
+        if (isLineOnlyToken(text, tokenIndex, token.length)) return tokenIndex;
+        index = tokenIndex + token.length;
+    }
+    return -1;
+}
+
+function hasLineOnlyToken(text, token) {
+    return findNextLineOnlyToken(text, token, 0) !== -1;
+}
+
+function findDisplayMathBlockEnd(text, startIndex, delimiter) {
+    if (!isLineOnlyToken(text, startIndex, delimiter.length)) {
+        return -1;
+    }
+
+    let searchIndex = startIndex + delimiter.length;
+    while (searchIndex < text.length) {
+        const closeIndex = text.indexOf(delimiter, searchIndex);
+        if (closeIndex === -1) return -1;
+
+        if (isLineOnlyToken(text, closeIndex, delimiter.length)) {
+            const lineEnd = text.indexOf('\n', closeIndex + delimiter.length);
+            return lineEnd === -1 ? text.length : lineEnd + 1;
+        }
+
+        searchIndex = closeIndex + delimiter.length;
+    }
+
+    return -1;
+}
+
+function findConventionalThinkEnd(text, startIndex) {
+    THINK_END_REGEX.lastIndex = startIndex;
+    const match = THINK_END_REGEX.exec(text);
+    THINK_END_REGEX.lastIndex = 0;
+    return match ? match.index + match[0].length : -1;
+}
+
+function findConventionalThinkStart(text, startIndex) {
+    THINK_START_REGEX.lastIndex = startIndex;
+    const match = THINK_START_REGEX.exec(text);
+    THINK_START_REGEX.lastIndex = 0;
+    return match ? match.index : -1;
+}
+
+function findParagraphStableCutoff(text, floorOffset) {
+    const boundaries = [];
+    let searchIndex = Math.max(0, floorOffset);
+
+    while (searchIndex < text.length) {
+        const boundaryIndex = text.indexOf('\n\n', searchIndex);
+        if (boundaryIndex === -1) break;
+
+        const cutoff = boundaryIndex + 2;
+        if (cutoff > floorOffset) {
+            boundaries.push(cutoff);
+        }
+
+        searchIndex = cutoff;
+    }
+
+    if (boundaries.length <= STREAM_PARAGRAPH_SAFETY_BLOCKS) {
+        return floorOffset;
+    }
+
+    return boundaries[boundaries.length - 1 - STREAM_PARAGRAPH_SAFETY_BLOCKS];
+}
+
+function findHtmlTagEnd(text, tagStart) {
+    let quote = null;
+
+    for (let i = tagStart + 1; i < text.length; i++) {
+        const char = text[i];
+
+        if (quote) {
+            if (char === quote) {
+                quote = null;
+            }
+            continue;
+        }
+
+        if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+        }
+
+        if (char === '>') {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+function parseHtmlTagToken(text, tagStart) {
+    if (startsWithAt(text, tagStart, '<!--')) {
+        return { type: 'comment' };
+    }
+
+    const tagEnd = findHtmlTagEnd(text, tagStart);
+    if (tagEnd === -1) {
+        return { type: 'incomplete' };
+    }
+
+    const raw = text.slice(tagStart + 1, tagEnd);
+    const trimmed = raw.trim();
+
+    if (!trimmed) {
+        return { type: 'unknown', tagEnd };
+    }
+
+    if (trimmed[0] === '!' || trimmed[0] === '?') {
+        return { type: 'declaration', tagEnd };
+    }
+
+    const isClosing = trimmed[0] === '/';
+    const nameSource = isClosing ? trimmed.slice(1).trimStart() : trimmed;
+    const nameMatch = nameSource.match(/^([a-zA-Z][a-zA-Z0-9:-]*)/);
+    if (!nameMatch) {
+        return { type: 'unknown', tagEnd };
+    }
+
+    const name = nameMatch[1].toLowerCase();
+    return {
+        type: 'tag',
+        tagEnd,
+        name,
+        isClosing,
+        isSelfClosing: /\/\s*$/.test(trimmed)
+    };
+}
+
+function popHtmlIslandStack(stack, tagName) {
+    const topIndex = stack.lastIndexOf(tagName);
+    if (topIndex === -1) {
+        return false;
+    }
+
+    stack.splice(topIndex);
+    return true;
+}
+
+function isBareDivIslandLineStart(text, tagStart) {
+    const lineStart = tagStart === 0 ? 0 : text.lastIndexOf('\n', tagStart - 1) + 1;
+    const prefix = text.slice(lineStart, tagStart);
+
+    // 只把“新行上暴露的裸 <div>”视为动画岛入口。
+    // 行内代码 `... <div> ...`、普通 Markdown 文本中的 <div> 提及、反引号包裹的 `<div>` 都不会触发。
+    return prefix.trim() === '';
+}
+
+function scanBareDivIslandEnd(text, startIndex) {
+    const stack = [];
+    let index = startIndex;
+    const lowerText = text.toLowerCase();
+
+    while (index < text.length) {
+        if (index - startIndex > HTML_ISLAND_MAX_CHARS) {
+            return { end: -1, blocked: true, abandoned: true };
+        }
+
+        const tagStart = text.indexOf('<', index);
+        if (tagStart === -1) {
+            return { end: -1, blocked: true };
+        }
+
+        if (tagStart - startIndex > HTML_ISLAND_MAX_CHARS) {
+            return { end: -1, blocked: true, abandoned: true };
+        }
+
+        if (startsWithAt(text, tagStart, '<!--')) {
+            const commentEnd = text.indexOf('-->', tagStart + 4);
+            if (commentEnd === -1) {
+                return { end: -1, blocked: true };
+            }
+            index = commentEnd + 3;
+            continue;
+        }
+
+        const token = parseHtmlTagToken(text, tagStart);
+        if (token.type === 'incomplete') {
+            return { end: -1, blocked: true };
+        }
+
+        if (token.type !== 'tag') {
+            index = (token.tagEnd ?? tagStart) + 1;
+            continue;
+        }
+
+        const { name, tagEnd, isClosing, isSelfClosing } = token;
+
+        if (isClosing) {
+            popHtmlIslandStack(stack, name);
+            index = tagEnd + 1;
+
+            if (stack.length === 0) {
+                return { end: index, blocked: false };
+            }
+
+            continue;
+        }
+
+        const shouldPush = !isSelfClosing && !HTML_VOID_TAGS.has(name) && HTML_ISLAND_STACK_TAGS.has(name);
+        if (!shouldPush) {
+            index = tagEnd + 1;
+            continue;
+        }
+
+        stack.push(name);
+        if (stack.length > HTML_ISLAND_MAX_STACK_DEPTH) {
+            return { end: -1, blocked: true, abandoned: true };
+        }
+
+        index = tagEnd + 1;
+
+        if (HTML_RAWTEXT_TAGS.has(name)) {
+            const rawTextCloseStart = lowerText.indexOf(`</${name}`, index);
+            if (rawTextCloseStart === -1) {
+                return { end: -1, blocked: true };
+            }
+
+            const rawTextCloseToken = parseHtmlTagToken(text, rawTextCloseStart);
+            if (rawTextCloseToken.type === 'incomplete') {
+                return { end: -1, blocked: true };
+            }
+
+            if (rawTextCloseToken.type === 'tag' && rawTextCloseToken.isClosing && rawTextCloseToken.name === name) {
+                popHtmlIslandStack(stack, name);
+                index = rawTextCloseToken.tagEnd + 1;
+
+                if (stack.length === 0) {
+                    return { end: index, blocked: false };
+                }
+            } else {
+                index = rawTextCloseStart + 2;
+            }
+        }
+    }
+
+    return { end: -1, blocked: true };
+}
+
+function findBareDivIslandStableCutoff(text, startOffset = 0) {
+    if (typeof text !== 'string') {
+        return { cutoff: startOffset, blocked: false };
+    }
+
+    let index = Math.max(0, startOffset);
+    let cutoff = startOffset;
+
+    while (index < text.length) {
+        const tagStart = text.indexOf('<', index);
+        if (tagStart === -1) {
+            break;
+        }
+
+        if (startsWithAt(text, tagStart, '<!--')) {
+            const commentEnd = text.indexOf('-->', tagStart + 4);
+            if (commentEnd === -1) {
+                return { cutoff, blocked: true };
+            }
+            index = commentEnd + 3;
+            continue;
+        }
+
+        const token = parseHtmlTagToken(text, tagStart);
+        if (token.type === 'incomplete') {
+            return { cutoff, blocked: true };
+        }
+
+        if (token.type !== 'tag') {
+            index = (token.tagEnd ?? tagStart) + 1;
+            continue;
+        }
+
+        if (!token.isClosing && token.name === 'div' && !token.isSelfClosing && isBareDivIslandLineStart(text, tagStart)) {
+            const island = scanBareDivIslandEnd(text, tagStart);
+            if (island.end > tagStart) {
+                cutoff = island.end;
+                index = island.end;
+                continue;
+            }
+
+            return {
+                cutoff,
+                blocked: true,
+                abandoned: island.abandoned === true
+            };
+        }
+
+        index = token.tagEnd + 1;
+    }
+
+    return { cutoff, blocked: false };
+}
+
+function hasLikelyUnclosedHtmlIsland(text, startOffset = 0) {
+    return findBareDivIslandStableCutoff(text, startOffset).blocked;
+}
+
+function findRoleDividerSectionEnd(text, startIndex) {
+    ROLE_DIVIDER_REGEX.lastIndex = startIndex;
+    const startMatch = ROLE_DIVIDER_REGEX.exec(text);
+    ROLE_DIVIDER_REGEX.lastIndex = 0;
+
+    if (!startMatch || startMatch.index !== startIndex || startMatch[1]) {
+        return -1;
+    }
+
+    const role = startMatch[2];
+    const endToken = `<<<[END_ROLE_DIVIDE_${role}]>>>`;
+    const endIndex = text.indexOf(endToken, startIndex + startMatch[0].length);
+    return endIndex === -1 ? -1 : endIndex + endToken.length;
+}
+
 function findExplicitStablePrefix(text, startOffset = 0) {
     let index = Math.max(0, startOffset);
     let stableCutoff = startOffset;
+    let paragraphFloor = startOffset;
+    let blockedByUnclosedExplicitBlock = false;
 
     while (index < text.length) {
         if (startsWithAt(text, index, CODE_FENCE)) {
             const fenceEnd = findMatchingFenceEnd(text, index);
-            if (fenceEnd === -1) break;
+            if (fenceEnd === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
             stableCutoff = fenceEnd;
+            paragraphFloor = fenceEnd;
             index = fenceEnd;
+            continue;
+        }
+
+        if (startsWithAt(text, index, '$$') && isLineOnlyToken(text, index, 2)) {
+            const mathEnd = findDisplayMathBlockEnd(text, index, '$$');
+            if (mathEnd === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = mathEnd;
+            paragraphFloor = mathEnd;
+            index = mathEnd;
+            continue;
+        }
+
+        if (startsWithAt(text, index, '\\[') && isLineOnlyToken(text, index, 2)) {
+            const mathEnd = findDisplayMathBlockEnd(text, index, '\\]');
+            if (mathEnd === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = mathEnd;
+            paragraphFloor = mathEnd;
+            index = mathEnd;
             continue;
         }
 
         if (startsWithAt(text, index, TOOL_REQUEST_START)) {
             const endIndex = text.indexOf(TOOL_REQUEST_END, index + TOOL_REQUEST_START.length);
-            if (endIndex === -1) break;
+            if (endIndex === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
             stableCutoff = endIndex + TOOL_REQUEST_END.length;
+            paragraphFloor = stableCutoff;
             index = stableCutoff;
             continue;
         }
 
         if (startsWithAt(text, index, TOOL_RESULT_START)) {
             const endIndex = text.indexOf(TOOL_RESULT_END, index + TOOL_RESULT_START.length);
-            if (endIndex === -1) break;
+            if (endIndex === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
             stableCutoff = endIndex + TOOL_RESULT_END.length;
+            paragraphFloor = stableCutoff;
+            index = stableCutoff;
+            continue;
+        }
+
+        if (startsWithAt(text, index, TOOL_CALL_SUMMARY_START)) {
+            const endIndex = text.indexOf(TOOL_CALL_SUMMARY_END, index + TOOL_CALL_SUMMARY_START.length);
+            if (endIndex === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = endIndex + TOOL_CALL_SUMMARY_END.length;
+            paragraphFloor = stableCutoff;
+            index = stableCutoff;
+            continue;
+        }
+
+        if (startsWithAt(text, index, '<<<[ROLE_DIVIDE_')) {
+            const sectionEnd = findRoleDividerSectionEnd(text, index);
+            if (sectionEnd === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = sectionEnd;
+            paragraphFloor = stableCutoff;
             index = stableCutoff;
             continue;
         }
 
         if (startsWithAt(text, index, DESKTOP_PUSH_START)) {
             const endIndex = text.indexOf(DESKTOP_PUSH_END, index + DESKTOP_PUSH_START.length);
-            if (endIndex === -1) break;
+            if (endIndex === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
             stableCutoff = endIndex + DESKTOP_PUSH_END.length;
+            paragraphFloor = stableCutoff;
             index = stableCutoff;
+            continue;
+        }
+
+        if (startsWithAt(text, index, THOUGHT_CHAIN_START)) {
+            const endIndex = text.indexOf(THOUGHT_CHAIN_END, index + THOUGHT_CHAIN_START.length);
+            if (endIndex === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = endIndex + THOUGHT_CHAIN_END.length;
+            paragraphFloor = stableCutoff;
+            index = stableCutoff;
+            continue;
+        }
+
+        if (startsWithAt(text, index, DAILY_NOTE_START)) {
+            const endIndex = text.indexOf(DAILY_NOTE_END, index + DAILY_NOTE_START.length);
+            if (endIndex === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = endIndex + DAILY_NOTE_END.length;
+            paragraphFloor = stableCutoff;
+            index = stableCutoff;
+            continue;
+        }
+
+        if (startsWithAt(text, index, BURST_MARKER_TOKEN)) {
+            if (isLineOnlyToken(text, index, BURST_MARKER_TOKEN.length)) {
+                // 只有独立行的 <!--brk--> 才是 OpenHerPersona 分条触发器；
+                // 行内出现的注释只按普通 Markdown/HTML 内容处理，避免误切分。
+                stableCutoff = index + BURST_MARKER_TOKEN.length;
+                paragraphFloor = stableCutoff;
+            }
+            index += BURST_MARKER_TOKEN.length;
+            continue;
+        }
+
+        if (startsWithAt(text, index, MARKDOWN_SECTION_BREAK_TOKEN)) {
+            if (isLineOnlyToken(text, index, MARKDOWN_SECTION_BREAK_TOKEN.length)) {
+                // 独立行 Markdown 文档分段符 --- 可作为稳定切点；
+                // 目前只处理严格的 ---，暂不扩展到 ***/___ 或带空格变体。
+                stableCutoff = index + MARKDOWN_SECTION_BREAK_TOKEN.length;
+                paragraphFloor = stableCutoff;
+            }
+            index += MARKDOWN_SECTION_BREAK_TOKEN.length;
+            continue;
+        }
+
+        const thinkStart = findConventionalThinkStart(text, index);
+        if (thinkStart === index) {
+            const thinkEnd = findConventionalThinkEnd(text, index);
+            if (thinkEnd === -1) {
+                blockedByUnclosedExplicitBlock = true;
+                break;
+            }
+            stableCutoff = thinkEnd;
+            paragraphFloor = thinkEnd;
+            index = thinkEnd;
             continue;
         }
 
         index += 1;
     }
 
-    return stableCutoff;
+    if (blockedByUnclosedExplicitBlock) {
+        return stableCutoff;
+    }
+
+    const divIslandResult = findBareDivIslandStableCutoff(text, paragraphFloor);
+    if (divIslandResult.cutoff > stableCutoff) {
+        stableCutoff = divIslandResult.cutoff;
+        paragraphFloor = divIslandResult.cutoff;
+    }
+
+    if (divIslandResult.blocked) {
+        return stableCutoff;
+    }
+
+    const paragraphCutoff = findParagraphStableCutoff(text, paragraphFloor);
+    return Math.max(stableCutoff, paragraphCutoff);
 }
 
 /**
@@ -542,13 +1284,22 @@ function renderStreamFrame(messageId) {
     // 🟢 使用缓存的 DOM 引用
     const cachedDom = getCachedMessageDom(messageId);
     if (!cachedDom) return;
-    
-    const { contentDiv } = cachedDom;
-    const { stableRoot, tailRoot } = ensureStreamingRoots(contentDiv);
+
+    const { contentDiv, messageItem } = cachedDom;
+    const { stableRoot, stableBlocksRoot, tailRoot } = ensureStreamingRoots(contentDiv);
     const segmentState = getOrCreateStreamSegmentState(messageId);
 
     const textForRendering = accumulatedStreamText.get(messageId) || "";
-    const nextStableCutoff = findExplicitStablePrefix(textForRendering, segmentState.stableCutoff);
+    let nextStableCutoff = findExplicitStablePrefix(textForRendering, segmentState.stableCutoff);
+
+    // burst 流式开始后，stable 区只在下一个独立行 brk 到达时继续推进。
+    // 否则普通段落 stable 会把“正在打字的当前气泡”提前固化成新的 stable block，
+    // 再被原子提升为独立气泡，表现为“所有 stable 都自动分成气泡”。
+    if ((segmentState.burstBubbleCount > 0 || contentDiv.classList.contains('burst-streaming'))
+        && nextStableCutoff > segmentState.stableCutoff
+        && !hasLineOnlyToken(textForRendering.slice(segmentState.stableCutoff, nextStableCutoff), BURST_MARKER_TOKEN)) {
+        nextStableCutoff = segmentState.stableCutoff;
+    }
 
     // 移除思考指示器
     const streamingIndicator = contentDiv.querySelector('.streaming-indicator, .thinking-indicator');
@@ -556,16 +1307,44 @@ function renderStreamFrame(messageId) {
 
     if (nextStableCutoff > segmentState.stableCutoff) {
         const stableText = textForRendering.slice(0, nextStableCutoff);
-        const processedStableText = applyStreamingPreprocessors(stableText);
-        const stableHtml = refs.markedInstance.parse(processedStableText);
-        stableRoot.innerHTML = stableHtml;
+        const newStableText = textForRendering.slice(segmentState.stableRenderedCutoff, nextStableCutoff);
+        const hasBurstMarkerInStable = hasLineOnlyToken(stableText, BURST_MARKER_TOKEN);
+        const hasBurstMarkerInNewStable = hasLineOnlyToken(newStableText, BURST_MARKER_TOKEN);
         segmentState.stableCutoff = nextStableCutoff;
-        segmentState.stableHtml = stableHtml;
+
+        appendNewStableRange(stableBlocksRoot, segmentState, textForRendering, nextStableCutoff, {
+            messageId,
+            settings: refs.globalSettingsRef?.get?.()
+        });
+
+        // OpenHerPersona 聊天分条：一旦稳定区出现 brk，立即进入 burst-streaming。
+        // 流式路径不再解包已稳定 DOM，也不再对 stableBlocksRoot 做全量 split；
+        // 而是按独立行 brk 在源码层切分 stable block，并把每个 stable block 原子提升为气泡。
+        // 这样避免 stable -> burst 之间的 live DOM 拆包/重包中间态，降低透明闪烁和复杂后处理节点抖动。
+        try {
+            let bubbles = [];
+            if (hasBurstMarkerInStable || hasBurstMarkerInNewStable) {
+                contentDiv.classList.add('burst-streaming');
+                if (messageItem) messageItem.dataset.burstRevealed = 'true';
+                bubbles = promoteStableBlocksToBurstBubbles(stableBlocksRoot, messageItem);
+                ensureBurstTailRow(contentDiv, tailRoot, messageItem);
+            }
+            if (bubbles.length > 0) {
+                bubbles.forEach((bubble, index) => {
+                    if (index >= segmentState.burstBubbleCount) {
+                        bubble.classList.add('burst-pending');
+                        bubble.style.animationDelay = '0ms';
+                    }
+                });
+                segmentState.burstBubbleCount = bubbles.length;
+            }
+        } catch (error) {
+            console.warn('[StreamManager] burst bubble split failed:', error);
+        }
     }
 
     const tailText = textForRendering.slice(segmentState.stableCutoff);
-    const processedText = applyStreamingPreprocessors(tailText);
-    const rawHtml = refs.markedInstance.parse(processedText);
+    const rawHtml = parseStreamTail(tailText);
 
     if (refs.morphdom) {
         try {
@@ -734,17 +1513,31 @@ function throttledScrollToBottom(messageId) {
 
 function processAndRenderSmoothChunk(messageId) {
     const queue = streamingChunkQueues.get(messageId);
-    if (!queue || queue.length === 0) return;
+    let shouldRender = false;
 
-    const globalSettings = refs.globalSettingsRef.get();
-    const minChunkSize = globalSettings.minChunkBufferSize !== undefined && globalSettings.minChunkBufferSize >= 1 ? globalSettings.minChunkBufferSize : 1;
+    if (queue && queue.length > 0) {
+        const globalSettings = refs.globalSettingsRef.get();
+        const minChunkSize = globalSettings.minChunkBufferSize !== undefined && globalSettings.minChunkBufferSize >= 1 ? globalSettings.minChunkBufferSize : 1;
+        const queuedChars = queue.reduce((total, chunk) => total + chunk.length, 0);
+        const isFinalized = messageIsFinalized(messageId);
+        const adaptiveTarget = Math.ceil(queuedChars / (isFinalized ? 8 : 15));
+        const drainTarget = Math.max(minChunkSize, adaptiveTarget, isFinalized ? 80 : 0);
 
-    // Drain a small batch from the queue. The rendering uses the accumulated text,
-    // so we don't need the return value here. This just advances the stream.
-    let processedChars = 0;
-    while (queue.length > 0 && processedChars < minChunkSize) {
-        processedChars += queue.shift().length;
+        // 自适应排空：队列越深，每帧消费越多；finalize 后加速追平，避免剩余文本瞬移。
+        let processedChars = 0;
+        while (queue.length > 0 && processedChars < drainTarget) {
+            processedChars += queue.shift().length;
+        }
+
+        shouldRender = true;
     }
+
+    if (pendingDirectRenderMessages.has(messageId)) {
+        pendingDirectRenderMessages.delete(messageId);
+        shouldRender = true;
+    }
+
+    if (!shouldRender) return;
 
     // Render the current state of the accumulated text using our lightweight method.
     renderStreamFrame(messageId);
@@ -757,9 +1550,12 @@ function processAndRenderSmoothChunk(messageId) {
 }
 
 function renderChunkDirectlyToDOM(messageId, textToAppend) {
-    // For non-smooth streaming, we just render the new frame immediately using the lightweight method.
-    // The check for whether it's in the current view is handled inside renderStreamFrame.
-    renderStreamFrame(messageId);
+    // 非平滑流式不再每个网络 chunk 立即渲染；只标记为 dirty，由全局 rAF 循环按 TARGET_FPS 合帧。
+    pendingDirectRenderMessages.add(messageId);
+    if (!streamingTimers.has(messageId)) {
+        streamingTimers.set(messageId, true);
+        startGlobalRenderLoop();
+    }
 }
 
 export async function startStreamingMessage(message, passedMessageItem = null) {
@@ -1227,6 +2023,11 @@ function processDesktopPushToken(messageId, textToAppend) {
  * 清理消息的桌面推送状态
  */
 function cleanupDesktopPushState(messageId) {
+    const state = desktopPushStates.get(messageId);
+    if (state?.pushTimer) {
+        clearInterval(state.pushTimer);
+        state.pushTimer = null;
+    }
     desktopPushStates.delete(messageId);
 }
 
@@ -1353,7 +2154,7 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
         return;
     }
     
-    const { chatMessagesDiv, markedInstance, uiHelper } = refs;
+    const { chatMessagesDiv, uiHelper } = refs;
     const isForCurrentView = isMessageForCurrentView(storedContext);
     
     // Get the correct history
@@ -1430,31 +2231,46 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
             if (contentDiv) {
                 contentDiv.querySelectorAll('.vcp-stream-stable-root, .vcp-stream-tail-root').forEach((el) => el.remove());
 
-                const globalSettings = refs.globalSettingsRef.get();
-                // Use the more thorough preprocessFullContent for the final render
-                // 🟢 架构级修复：preprocessFullContent 现在返回 {text, toolResultMap}
-                // 但这里直接使用 markedInstance.parse()（即 streamingMarkedInstance wrapper），
-                // 它内部已经处理了 preprocessFullContent + LaTeX 保护 + 工具结果恢复
-                // 所以这里直接传原始文本给 wrapper，避免双重预处理
-                const rawHtml = markedInstance.parse(finalFullText);
+                const preparedFinal = typeof refs.prepareFinalTextForRender === 'function'
+                    ? refs.prepareFinalTextForRender(messageId, finalFullText, message.role || 'assistant', historyForThisMessage)
+                    : { text: finalFullText, role: message.role || 'assistant', depth: 0 };
+                const rawHtml = parseFullStreamContent(preparedFinal.text, {
+                    messageRole: preparedFinal.role,
+                    depth: preparedFinal.depth
+                });
                 
-                // Perform the final, high-quality render using the original global refresh method.
-                // This ensures images, KaTeX, code highlighting, etc., are all processed correctly.
-                refs.setContentAndProcessImages(contentDiv, rawHtml, messageId);
-                
-                // Step 1: Run synchronous processors (KaTeX, hljs, etc.)
-                refs.processRenderedContent(contentDiv);
+                if (typeof refs.renderPostProcessedHtml === 'function') {
+                    await refs.renderPostProcessedHtml(contentDiv, rawHtml, {
+                        messageId,
+                        message,
+                        settings: refs.globalSettingsRef?.get?.(),
+                        renderSessionId: null,
+                        runHeavy: true,
+                        includeAttachments: true
+                    });
+                } else {
+                    // Perform the final, high-quality render using the original global refresh method.
+                    // This ensures images, KaTeX, code highlighting, etc., are all processed correctly.
+                    refs.setContentAndProcessImages(contentDiv, rawHtml, messageId);
+                    
+                    // Step 1: Run synchronous processors (KaTeX, hljs, etc.)
+                    refs.processRenderedContent(contentDiv);
 
-                // Step 2: Defer TreeWalker-based highlighters to ensure DOM is stable
-                setTimeout(() => {
-                    if (contentDiv && contentDiv.isConnected) {
-                        refs.runTextHighlights(contentDiv);
+                    if (typeof refs.renderMermaidDiagrams === 'function') {
+                        await refs.renderMermaidDiagrams(contentDiv);
                     }
-                }, 0);
 
-                // Step 3: Process animations, scripts, and 3D scenes
-                if (refs.processAnimationsInContent) {
-                    refs.processAnimationsInContent(contentDiv);
+                    // Step 2: Defer TreeWalker-based highlighters to ensure DOM is stable
+                    setTimeout(() => {
+                        if (contentDiv && contentDiv.isConnected) {
+                            refs.runTextHighlights(contentDiv);
+                        }
+                    }, 0);
+
+                    // Step 3: Process animations, scripts, and 3D scenes
+                    if (refs.processAnimationsInContent) {
+                        refs.processAnimationsInContent(contentDiv);
+                    }
                 }
             }
             
@@ -1465,11 +2281,6 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
                 timestampDiv.textContent = formatMessageTimestamp(message.timestamp || Date.now());
                 nameTimeBlock.appendChild(timestampDiv);
             }
-
-            messageItem.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                refs.showContextMenu(e, messageItem, message);
-            });
 
             uiHelper.scrollToBottom();
         }
@@ -1484,6 +2295,7 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
     
     // Cleanup
         streamingChunkQueues.delete(messageId);
+        pendingDirectRenderMessages.delete(messageId);
         accumulatedStreamText.delete(messageId);
         streamSegmentStates.delete(messageId);
         cleanupDesktopPushState(messageId);
@@ -1532,9 +2344,9 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
     
         streamingChunkQueues.clear();
         streamingTimers.clear();
+        pendingDirectRenderMessages.clear();
         accumulatedStreamText.clear();
         streamSegmentStates.clear();
-        elementContentLengthCache.clear();
         messageDomCache.clear();
         preBufferedChunks.clear();
         messageInitializationStatus.clear();

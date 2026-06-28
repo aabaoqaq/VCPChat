@@ -1,8 +1,6 @@
 ﻿// renderer_modules/config.js
 // VCPHumanToolBox工具定义
-// 最后更新: 2026-04-21by CodeCC &赵枫
-// 备份: config.js.bak.20260421
-// 工具总数: 45 (原39+ 新增6)
+// author:lionsky & infinite-vector
 
 // --- 工具定义 ---
 export const tools = {
@@ -61,7 +59,7 @@ export const tools = {
         }
     },
     'FluxGen': {
-        displayName:'Flux 图片生成',
+        displayName: 'Flux 图片生成',
         description: '艺术风格多变，仅支持英文提示词。[后端插件: FluxGen]',
         params: [
             { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
@@ -120,7 +118,7 @@ export const tools = {
         }
     },
     'GeminiImageGen': {
-        displayName:'Gemini 图像生成',
+        displayName: 'Gemini 图像生成',
         description: '使用 Google Gemini 模型进行图像生成和编辑，支持英文提示词。[后端插件: GeminiImageGen]',
         commands: {
             'generate': {
@@ -198,7 +196,7 @@ export const tools = {
         }
     },
     'WanVideoGen': {
-        displayName:'Wan视频生成',
+        displayName: 'Wan视频生成',
         description: '基于强大的Wan系列模型生成视频。[后端插件: VideoGenerator]',
         commands: {
             'submit': {
@@ -347,6 +345,25 @@ export const tools = {
             { name: 'expression', type: 'textarea', required: true, placeholder: "例如: integral('x**2', 0, 1)" }
         ]
     },
+    'DomainSafetyChecker': {
+        displayName: '域名/URL 安全核查',
+        description: '对 URL 或域名执行低交互、静态、非侵入式安全核查，返回适合直接展示给用户的 Markdown 报告，并附完整 JSON 证据。不会执行 JavaScript、提交表单、爆破、端口扫描或绕过访问控制。[后端插件: DomainSafetyChecker]',
+        params: [
+            { name: 'target', type: 'text', required: true, placeholder: 'https://example.com/login 或 example.com', description: '要核查的 URL 或域名；也兼容 url/domain 字段。' },
+            { name: 'timeout', type: 'number', required: false, default: 12, min: 1, max: 60, placeholder: '12', description: '网络请求超时秒数；普通检查建议 8-15，网络较慢可用 20-30。' },
+            { name: 'maxBytes', type: 'number', required: false, default: 2000000, placeholder: '2000000', description: '单次 HTTP 最多读取字节数；也兼容 max_bytes。' },
+            { name: 'defaultScheme', type: 'select', required: false, options: ['https', 'http'], default: 'https', description: '裸域名输入时默认协议；也兼容 default_scheme。' },
+            { name: 'fetchScripts', type: 'checkbox', required: false, default: false, description: '是否额外下载外部 JS 做静态扫描；更全面但更慢，也兼容 fetch_scripts。' },
+            { name: 'noTls', type: 'checkbox', required: false, default: false, description: '跳过 TLS 证书检查；也兼容 no_tls。' },
+            { name: 'noHttp', type: 'checkbox', required: false, default: false, description: '跳过明文 HTTP 探测；也兼容 no_http。' },
+            { name: 'getHttp', type: 'checkbox', required: false, default: false, description: '明文 HTTP 也使用 GET；默认只用 HEAD 以降低交互，也兼容 get_http。' },
+            { name: 'whois', type: 'checkbox', required: false, default: false, description: '尝试调用系统 whois 命令；未安装时会在报告中记录不可用。' },
+            { name: 'includeJson', type: 'checkbox', required: false, default: true, description: '在 Markdown 报告末尾附加完整原始 JSON 结构化结果；建议保留，也兼容 include_json。' },
+            { name: 'proxyEnabled', type: 'checkbox', required: false, default: false, description: '仅本次调用覆盖代理启用状态；也兼容 proxy_enabled。' },
+            { name: 'proxyUrl', type: 'text', required: false, placeholder: 'http://127.0.0.1:7890', description: '仅本次调用覆盖 config.env 中的代理地址；也兼容 proxy_url。' },
+            { name: 'proxyRetryOnFailure', type: 'checkbox', required: false, default: true, description: '直连失败或遇到 403/407/408/429/5xx 时自动代理重试；也兼容 proxy_retry_on_failure。' }
+        ]
+    },
 
     // ========================================
     // 联网搜索类
@@ -463,7 +480,7 @@ export const tools = {
         ]
     },
     'BilibiliFetch': {
-        displayName:'B站内容获取',
+        displayName: 'B站内容获取',
         description: '获取B站视频文本、弹幕、评论及快照。[后端插件: BilibiliFetch]',
         commands: {
             'fetch': {
@@ -625,7 +642,7 @@ export const tools = {
     // 学术研究
     // ========================================
     'PubMedSearch': {
-        displayName:'PubMed 文献检索',
+        displayName: 'PubMed 文献检索',
         description: '基于NCBI E-utilities的PubMed学术文献检索，支持关键词/作者/期刊/MeSH搜索、全文获取、引用分析和引用导出。[后端插件: PubMedSearch]',
         commands: {
             'search_articles': {
@@ -879,12 +896,13 @@ export const tools = {
         displayName: '快速回忆',
         description: '主动检索日记本或知识库。[后端插件: LightMemo]',
         params: [
-            { name: 'maid', type: 'text', required: true, placeholder:'Nova' },
+            { name: 'maid', type: 'text', required: true, placeholder: 'Nova' },
             { name: 'folder', type: 'text', required: false, placeholder: '特定的索引文件夹' },
             { name: 'query', type: 'textarea', required: true, placeholder: '记忆检索内容' },
             { name: 'k', type: 'number', required: false, default: 5 },
             { name: 'rerank', type: 'text', required: false, placeholder: 'true / false / 0.6(RRF融合)' },
             { name: 'tag_boost', type: 'text', required: false, placeholder: '0.6或 0.6+ (浪潮V8)' },
+            { name: 'use_bm25', type: 'text', required: false, default: 'true', placeholder: 'true / false' },
             { name: 'search_all_knowledge_bases', type: 'checkbox', required: false, default: true }
         ]
     },
@@ -907,6 +925,14 @@ export const tools = {
                     { name: 'clusterName', type: 'text', required: false, placeholder: '指定簇文件夹' },
                     { name: 'targetText', type: 'textarea', required: true, placeholder: '需要被替换的旧内容（至少15字）' },
                     { name: 'replacementText', type: 'textarea', required: true, placeholder: '更新后的新内容' }
+                ]
+            },
+            'ListClusters': {
+                description: '查看思维簇内容（支持按链名/簇名/全量查看）',
+                params: [
+                    { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
+                    { name: 'chainName', type: 'text', required: false, placeholder: '链名如 default, coding, disco（逗号分隔多个）' },
+                    { name: 'clusterName', type: 'text', required: false, placeholder: '簇文件夹名（逗号分隔多个）' }
                 ]
             }
         }
@@ -944,7 +970,7 @@ export const tools = {
                 description: '读取未锁定话题及消息历史',
                 params: [
                     { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
-                    { name: 'include_read', type: 'select', options: ['false','true'], description: '是否包含已读' }
+                    { name: 'include_read', type: 'select', options: ['false', 'true'], description: '是否包含已读' }
                 ]
             },
             'CheckNewTopics': {
@@ -1008,7 +1034,7 @@ export const tools = {
                 description: '控制台灯',
                 params: [
                     { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
-                    { name: 'power', type: 'select', options: ['','True', 'False'], description: '电源' },
+                    { name: 'power', type: 'select', options: ['', 'True', 'False'], description: '电源' },
                     { name: 'brightness', type: 'number', min: 1, max: 100, placeholder: '1-100', description: '亮度' },
                     { name: 'color_temperature', type: 'number', min: 2500, max: 4800, placeholder: '2500-4800', description: '色温' }
                 ]
@@ -1016,7 +1042,7 @@ export const tools = {
         }
     },
     'VCPAlarm': {
-        displayName:'Vchat闹钟',
+        displayName: 'Vchat闹钟',
         description: '设置一个闹钟。[前端分布式: VCPAlarm]',
         params: [
             { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
@@ -1057,7 +1083,7 @@ export const tools = {
         }
     },
     'PowerShellExecutor': {
-        displayName:'PowerShell (前端)',
+        displayName: 'PowerShell (前端)',
         description: '在前端执行PowerShell命令。[前端分布式: PowerShellExecutor]',
         params: [
             { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
