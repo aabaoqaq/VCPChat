@@ -14,12 +14,14 @@ RAGmodules/config.env
 VCPDistributedServer/Plugin/DeepMemo/config.env
 VCPDistributedServer/Plugin/DeepMemo/config.env.local
 VCPDistributedServer/Plugin/DistImageServer/config.env
+audio_engine/.env
 
 # === 用户数据 ===
 assets/wallpaper/
 
 # === 运行时产物 ===
 AppData/
+audio_engine/loudness_cache.db
 VCPDistributedServer/Plugin/PTYShellExecutor/reports/
 VCPDistributedServer/Plugin/BladeGame/game_state.json
 VCPDistributedServer/Plugin/BladeGame/备份/
