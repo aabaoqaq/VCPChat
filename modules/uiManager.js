@@ -1,6 +1,6 @@
 /**
  * uiManager.js
- * 
+ *
  * Manages general UI functionalities like the title bar, resizers, theme, and clock.
  */
 const uiManager = (() => {
@@ -46,17 +46,51 @@ const uiManager = (() => {
      * Initializes the resizable sidebars.
      */
     function initializeResizers() {
-        let isResizingLeft = false;
-        let isResizingRight = false;
-        let startX = 0;
+        let resizeState = null;
+        let pendingWidth = null;
+        let resizeFrame = 0;
+
+        const getWidthConstraints = (element, fallbackMin) => {
+            const computed = getComputedStyle(element);
+            return {
+                min: parseFloat(computed.minWidth) || fallbackMin,
+                max: parseFloat(computed.maxWidth) || 600
+            };
+        };
+
+        const flushResizeWidth = () => {
+            resizeFrame = 0;
+            if (!resizeState || pendingWidth === null) return;
+            resizeState.element.style.width = `${pendingWidth}px`;
+        };
+
+        const scheduleResizeWidth = (width) => {
+            pendingWidth = width;
+            if (!resizeFrame) {
+                resizeFrame = requestAnimationFrame(flushResizeWidth);
+            }
+        };
+
+        const beginResize = (side, element, clientX, fallbackMin) => {
+            const constraints = getWidthConstraints(element, fallbackMin);
+            resizeState = {
+                side,
+                element,
+                startX: clientX,
+                startWidth: element.getBoundingClientRect().width,
+                minWidth: constraints.min,
+                maxWidth: constraints.max
+            };
+            pendingWidth = resizeState.startWidth;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            document.body.classList.add('vcp-sidebar-resizing');
+            element.style.transition = 'none';
+        };
 
         if (resizerLeft && leftSidebar) {
             resizerLeft.addEventListener('mousedown', (e) => {
-                isResizingLeft = true;
-                startX = e.clientX;
-                document.body.style.cursor = 'col-resize';
-                document.body.style.userSelect = 'none';
-                if (leftSidebar) leftSidebar.style.transition = 'none';
+                beginResize('left', leftSidebar, e.clientX, 180);
             });
         }
 
@@ -65,74 +99,61 @@ const uiManager = (() => {
                 if (!rightNotificationsSidebar.classList.contains('active')) {
                     electronAPI.sendToggleNotificationsSidebar();
                     requestAnimationFrame(() => {
-                        isResizingRight = true;
-                        startX = e.clientX;
-                        document.body.style.cursor = 'col-resize';
-                        document.body.style.userSelect = 'none';
-                        rightNotificationsSidebar.style.transition = 'none';
+                        beginResize('right', rightNotificationsSidebar, e.clientX, 220);
                     });
                 } else {
-                    isResizingRight = true;
-                    startX = e.clientX;
-                    document.body.style.cursor = 'col-resize';
-                    document.body.style.userSelect = 'none';
-                    rightNotificationsSidebar.style.transition = 'none';
+                    beginResize('right', rightNotificationsSidebar, e.clientX, 220);
                 }
             });
         }
 
         document.addEventListener('mousemove', (e) => {
-            if (isResizingLeft && leftSidebar) {
-                const deltaX = e.clientX - startX;
-                const currentWidth = leftSidebar.offsetWidth;
-                let newWidth = currentWidth + deltaX;
-                newWidth = Math.max(parseInt(getComputedStyle(leftSidebar).minWidth, 10) || 180, Math.min(newWidth, parseInt(getComputedStyle(leftSidebar).maxWidth, 10) || 600));
-                leftSidebar.style.width = `${newWidth}px`;
-                startX = e.clientX;
-            }
-            if (isResizingRight && rightNotificationsSidebar && rightNotificationsSidebar.classList.contains('active')) {
-                const deltaX = e.clientX - startX;
-                const currentWidth = rightNotificationsSidebar.offsetWidth;
-                let newWidth = currentWidth - deltaX;
-                newWidth = Math.max(parseInt(getComputedStyle(rightNotificationsSidebar).minWidth, 10) || 220, Math.min(newWidth, parseInt(getComputedStyle(rightNotificationsSidebar).maxWidth, 10) || 600));
-                rightNotificationsSidebar.style.width = `${newWidth}px`;
-                startX = e.clientX;
-            }
+            if (!resizeState) return;
+
+            const deltaX = e.clientX - resizeState.startX;
+            const rawWidth = resizeState.side === 'left'
+                ? resizeState.startWidth + deltaX
+                : resizeState.startWidth - deltaX;
+            const nextWidth = Math.max(
+                resizeState.minWidth,
+                Math.min(rawWidth, resizeState.maxWidth)
+            );
+            scheduleResizeWidth(nextWidth);
         });
 
         document.addEventListener('mouseup', async () => {
-            let settingsChanged = false;
-            const currentSettings = globalSettingsRef.get();
+            if (!resizeState) return;
 
-            if (isResizingLeft && leftSidebar) {
-                leftSidebar.style.transition = '';
-                const newSidebarWidth = leftSidebar.offsetWidth;
-                if (currentSettings.sidebarWidth !== newSidebarWidth) {
-                    currentSettings.sidebarWidth = newSidebarWidth;
-                    settingsChanged = true;
-                }
+            if (resizeFrame) {
+                cancelAnimationFrame(resizeFrame);
+                resizeFrame = 0;
             }
-            if (isResizingRight && rightNotificationsSidebar && rightNotificationsSidebar.classList.contains('active')) {
-                rightNotificationsSidebar.style.transition = '';
-                const newNotificationsWidth = rightNotificationsSidebar.offsetWidth;
-                if (currentSettings.notificationsSidebarWidth !== newNotificationsWidth) {
-                    currentSettings.notificationsSidebarWidth = newNotificationsWidth;
-                    settingsChanged = true;
-                }
-            }
+            flushResizeWidth();
 
-            isResizingLeft = false;
-            isResizingRight = false;
+            const completedResize = resizeState;
+            const completedWidth = pendingWidth;
+            resizeState = null;
+            pendingWidth = null;
+
+            completedResize.element.style.transition = '';
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
+            document.body.classList.remove('vcp-sidebar-resizing');
 
-            if (settingsChanged) {
-                try {
-                    await electronAPI.saveSettings(currentSettings);
-                    console.log('Sidebar widths saved to settings.');
-                } catch (error) {
-                    console.error('Failed to save sidebar widths:', error);
-                }
+            const currentSettings = globalSettingsRef.get();
+            const settingKey = completedResize.side === 'left'
+                ? 'sidebarWidth'
+                : 'notificationsSidebarWidth';
+            const roundedWidth = Math.round(completedWidth);
+
+            if (currentSettings[settingKey] === roundedWidth) return;
+            currentSettings[settingKey] = roundedWidth;
+
+            try {
+                await electronAPI.saveSettings(currentSettings);
+                console.log('Sidebar width saved to settings.');
+            } catch (error) {
+                console.error('Failed to save sidebar width:', error);
             }
         });
     }
@@ -147,7 +168,7 @@ const uiManager = (() => {
             // As a fallback, we'll default to light, but the initial theme should come from the main process.
             theme = 'light';
         }
-        
+
         // Apply class to body for CSS styling
         document.body.classList.remove('light-theme', 'dark-theme');
         document.body.classList.add(`${theme}-theme`);
@@ -294,13 +315,13 @@ const uiManager = (() => {
                     switchToTab(nextButton.dataset.tab);
                     nextButton.focus();
                 });
-                
+
                 // 中键点击 - 如果是设置标签，直接打开全局设置
                 button.addEventListener('mousedown', (e) => {
                     if (e.button === 1 && button.dataset.tab === 'settings') {
                         e.preventDefault();
                         e.stopPropagation();
-                        
+
                         // 打开全局设置模态框
                         if (window.uiHelperFunctions && window.uiHelperFunctions.openModal) {
                             console.log('[UIManager] Middle click on settings tab - opening global settings modal');
@@ -317,10 +338,145 @@ const uiManager = (() => {
     }
 
     /**
+     * Initializes the compact sidebar hover menu and topic drawer.
+     */
+    function setupCompactSidebarNavigation() {
+        if (!leftSidebar) return;
+
+        const navigation = leftSidebar.querySelector('.sidebar-compact-navigation');
+        const trigger = navigation?.querySelector('.sidebar-compact-trigger');
+        const menu = navigation?.querySelector('.sidebar-compact-menu');
+        const compactItems = navigation?.querySelectorAll('.sidebar-compact-menu-item');
+        const topicsPanel = document.getElementById('tabContentTopics');
+        const topicList = document.getElementById('topicList');
+        if (!navigation || !trigger || !menu || !compactItems?.length || !topicsPanel) return;
+
+        let closeMenuTimer = null;
+
+        const setCompactMenuOpen = (open) => {
+            if (closeMenuTimer) {
+                clearTimeout(closeMenuTimer);
+                closeMenuTimer = null;
+            }
+            navigation.classList.toggle('menu-open', open);
+            trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        };
+
+        const scheduleCompactMenuClose = () => {
+            if (closeMenuTimer) clearTimeout(closeMenuTimer);
+            closeMenuTimer = setTimeout(() => setCompactMenuOpen(false), 200);
+        };
+
+        const closeTopicDrawer = () => {
+            leftSidebar.classList.remove('compact-topics-open');
+            topicsPanel.classList.remove('compact-drawer-open');
+            topicsPanel.setAttribute('aria-hidden', 'true');
+            compactItems.forEach(item => {
+                item.classList.toggle('active', item.dataset.compactAction === 'agents');
+            });
+        };
+
+        const openTopicDrawer = () => {
+            if (!leftSidebar.classList.contains('avatar-only')) return;
+
+            leftSidebar.classList.add('compact-topics-open');
+            topicsPanel.classList.add('compact-drawer-open');
+            topicsPanel.setAttribute('aria-hidden', 'false');
+            compactItems.forEach(item => {
+                item.classList.toggle('active', item.dataset.compactAction === 'topics');
+            });
+
+            window.topicListManager?.loadTopicList?.();
+            window.topicListManager?.setupTopicSearch?.();
+            refreshUnreadCounts();
+            setCompactMenuOpen(false);
+        };
+
+        navigation.addEventListener('mouseenter', () => setCompactMenuOpen(true));
+        navigation.addEventListener('mouseleave', scheduleCompactMenuClose);
+        trigger.addEventListener('focus', () => setCompactMenuOpen(true));
+        navigation.addEventListener('focusout', (event) => {
+            if (!navigation.contains(event.relatedTarget)) scheduleCompactMenuClose();
+        });
+
+        document.addEventListener('compact-sidebar-open-topics', () => {
+            if (!leftSidebar.classList.contains('avatar-only')) return;
+            openTopicDrawer();
+        });
+
+        compactItems.forEach(item => {
+            item.addEventListener('click', () => {
+                const action = item.dataset.compactAction;
+                if (action === 'agents') {
+                    closeTopicDrawer();
+                    setCompactMenuOpen(false);
+                    return;
+                }
+
+                if (action === 'topics') {
+                    if (leftSidebar.classList.contains('compact-topics-open')) {
+                        closeTopicDrawer();
+                    } else {
+                        openTopicDrawer();
+                    }
+                    return;
+                }
+
+                if (action === 'settings') {
+                    closeTopicDrawer();
+                    leftSidebar.classList.remove('avatar-only');
+                    const settings = globalSettingsRef.get();
+                    settings.sidebarAvatarOnly = false;
+                    electronAPI?.saveSettings?.(settings).catch(error => {
+                        console.error('[UIManager] Failed to save compact sidebar state:', error);
+                    });
+                    switchToTab('settings');
+                }
+            });
+        });
+
+        topicList?.addEventListener('click', (event) => {
+            if (leftSidebar.classList.contains('compact-topics-open') && event.target.closest('.topic-item')) {
+                closeTopicDrawer();
+            }
+        });
+
+        document.addEventListener('pointerdown', (event) => {
+            if (!leftSidebar.classList.contains('compact-topics-open')) return;
+            if (topicsPanel.contains(event.target) || navigation.contains(event.target)) return;
+            closeTopicDrawer();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && leftSidebar.classList.contains('compact-topics-open')) {
+                closeTopicDrawer();
+                trigger.focus();
+            }
+        });
+
+        leftSidebar.addEventListener('transitionend', () => {
+            if (!leftSidebar.classList.contains('avatar-only')) {
+                closeTopicDrawer();
+                setCompactMenuOpen(false);
+            }
+        });
+    }
+
+    /**
      * Switches to the specified tab.
      * @param {string} targetTab - The tab to switch to.
      */
     function switchToTab(targetTab) {
+        // “仅头像”是助手列表专属布局；进入话题或设置时恢复完整侧栏。
+        if (targetTab !== 'agents' && leftSidebar?.classList.contains('avatar-only')) {
+            leftSidebar.classList.remove('avatar-only');
+            const settings = globalSettingsRef.get();
+            settings.sidebarAvatarOnly = false;
+            electronAPI?.saveSettings?.(settings).catch(error => {
+                console.error('[UIManager] Failed to save avatar-only sidebar state:', error);
+            });
+        }
+
         if (sidebarTabButtons) {
             sidebarTabButtons.forEach(btn => {
                 const isActive = btn.dataset.tab === targetTab;
@@ -421,6 +577,7 @@ const uiManager = (() => {
             await initializeTheme(); // Replaces loadAndApplyThemePreference
             initializeDigitalClock();
             setupSidebarTabs();
+            setupCompactSidebarNavigation();
 
             // Setup theme toggle button listener
             if (themeToggleBtn) {
@@ -428,7 +585,7 @@ const uiManager = (() => {
                     // Determine the new theme based on the current one
                     const isCurrentlyDark = document.body.classList.contains('dark-theme');
                     const newTheme = isCurrentlyDark ? 'light' : 'dark';
-                    
+
                     // Just tell the main process to set the theme.
                     // The UI update will happen automatically when we receive the 'theme-updated' event.
                     electronAPI.setTheme(newTheme);

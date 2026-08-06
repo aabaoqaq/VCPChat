@@ -739,6 +739,13 @@ window.topicListManager = (() => {
         deleteTopicPermanentlyOption.innerHTML = `<i class="fas fa-trash-alt"></i> 删除此话题`;
         deleteTopicPermanentlyOption.onclick = async () => {
             closeTopicContextMenu();
+
+            // 活动 Flowlock Session 仍依赖该话题的历史目录，运行期间禁止删除。
+            if (itemType === 'agent' && window.flowlockManager?.isTopicLocked?.(itemFullConfig.id, topic.id)) {
+                uiHelper.showToastNotification('该话题正在心流锁中运行，请先停止对应 Agent 的心流锁。', 'warning');
+                return;
+            }
+
             // 使用自定义确认对话框替代原生 confirm()，避免 Electron 焦点问题
             const confirmed = await uiHelper.showConfirmDialog(
                 `确定要永久删除话题 "${topic.name}" 吗？此操作不可撤销。`,
@@ -775,6 +782,15 @@ window.topicListManager = (() => {
             handleExportTopic(itemFullConfig.id, itemType, topic.id, topic.name);
         };
         menu.appendChild(exportTopicOption);
+
+        const exportFullTopicOption = document.createElement('div');
+        exportFullTopicOption.classList.add('context-menu-item');
+        exportFullTopicOption.innerHTML = `<i class="fas fa-file-code"></i> 导出此话题(完整)`;
+        exportFullTopicOption.onclick = () => {
+            closeTopicContextMenu();
+            handleExportFullTopic(itemFullConfig, itemType, topic.id, topic.name);
+        };
+        menu.appendChild(exportFullTopicOption);
 
         // 智能定位逻辑：先隐藏菜单以测量尺寸
         menu.style.visibility = 'hidden';
@@ -871,9 +887,9 @@ window.topicListManager = (() => {
                     const contentClone = contentElement.cloneNode(true);
                     contentClone.querySelectorAll('.vcp-thought-chain-bubble').forEach(el => el.remove());
                     let content = contentClone.innerText || contentClone.textContent || "";
-                    // 兜底：清理可能残留的明文形式思维链
-                    content = content.replace(/\[--- VCP元思考链(?::\s*"[^"]*")?\s*---\][\s\S]*?\[--- 元思考链结束 ---\]/gs, '');
-                    content = content.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '');
+                    // 兜底：仅清理起止标签分别独占一行的明文思维链。
+                    content = content.replace(/^[ \t]*\[--- VCP元思考链(?::\s*"[^"]*")?\s*---\][ \t]*\r?\n[\s\S]*?^[ \t]*\[--- 元思考链结束 ---\][ \t]*(?:\r?\n|$)/gm, '');
+                    content = content.replace(/^[ \t]*<think(?:ing)?>[ \t]*\r?\n[\s\S]*?^[ \t]*<\/think(?:ing)?>[ \t]*(?:\r?\n|$)/gim, '');
                     content = content.trim();
 
                     if (sender && content) {
@@ -907,6 +923,107 @@ window.topicListManager = (() => {
         } catch (error) {
             console.error(`[TopicListManager] 导出话题时发生错误:`, error);
             uiHelper.showToastNotification(`导出话题时发生前端错误: ${error.message}`, 'error');
+        }
+    }
+
+    function getRawMessageContent(message) {
+        if (typeof message?.content === 'string') return message.content;
+        if (typeof message?.content?.text === 'string') return message.content.text;
+        if (Array.isArray(message?.content)) {
+            return message.content
+                .filter(part => part && part.type === 'text' && typeof part.text === 'string')
+                .map(part => part.text)
+                .join('\n');
+        }
+        if (message?.content === null || message?.content === undefined) return '';
+        try {
+            return JSON.stringify(message.content, null, 2);
+        } catch {
+            return String(message.content);
+        }
+    }
+
+    function resolveFullExportAgentInfo(message, itemFullConfig, itemType) {
+        if (message.role === 'user') {
+            return {
+                name: message.name || '用户',
+                model: 'N/A'
+            };
+        }
+
+        if (itemType === 'group') {
+            const agentId = message.agentId || message.agentID;
+            const member = (itemFullConfig.agents || []).find(agent =>
+                agent.id === agentId || agent.agentId === agentId
+            );
+            const usesUnifiedModel = itemFullConfig.useUnifiedModel === true;
+            return {
+                name: message.name || member?.name || agentId || 'Assistant',
+                model: message.model || message.modelName ||
+                    (usesUnifiedModel ? itemFullConfig.unifiedModel : member?.model) ||
+                    '未知模型'
+            };
+        }
+
+        return {
+            name: message.name || itemFullConfig.name || itemFullConfig.id || 'Assistant',
+            model: message.model || message.modelName || itemFullConfig.model || '未知模型'
+        };
+    }
+
+    async function handleExportFullTopic(itemFullConfig, itemType, topicId, topicName) {
+        console.log(`[TopicListManager] Exporting full raw topic: ${topicName} (ID: ${topicId})`);
+
+        try {
+            const history = itemType === 'group'
+                ? await electronAPI.getGroupChatHistory(itemFullConfig.id, topicId)
+                : await electronAPI.getChatHistory(itemFullConfig.id, topicId);
+
+            if (!Array.isArray(history)) {
+                throw new Error(history?.error || '无法读取话题历史');
+            }
+
+            const messages = history.filter(message =>
+                message &&
+                message.role !== 'system' &&
+                message.isThinking !== true
+            );
+
+            if (messages.length === 0) {
+                uiHelper.showToastNotification('此话题没有可导出的对话内容。', 'info');
+                return;
+            }
+
+            let exportContent = `# 话题: ${topicName}\n\n`;
+            exportContent += `> 导出模式: 完整（保留原始消息内容）\n\n`;
+
+            messages.forEach((message, index) => {
+                const { name, model } = resolveFullExportAgentInfo(message, itemFullConfig, itemType);
+                const rawContent = getRawMessageContent(message);
+
+                exportContent += `===== 消息 ${index + 1} =====\n`;
+                exportContent += `Role: ${message.role || 'unknown'}\n`;
+                exportContent += `Agent: ${name}\n`;
+                exportContent += `Model: ${model}\n`;
+                if (message.timestamp) {
+                    exportContent += `Timestamp: ${new Date(message.timestamp).toISOString()}\n`;
+                }
+                exportContent += `\n${rawContent}\n\n`;
+            });
+
+            const result = await electronAPI.exportTopicAsMarkdown({
+                topicName: `${topicName}-完整`,
+                markdownContent: exportContent
+            });
+
+            if (result.success) {
+                uiHelper.showToastNotification(`话题 "${topicName}" 已完整导出到: ${result.path}`);
+            } else if (result.error !== '用户取消了导出操作。') {
+                uiHelper.showToastNotification(`完整导出话题失败: ${result.error}`, 'error');
+            }
+        } catch (error) {
+            console.error('[TopicListManager] 完整导出话题时发生错误:', error);
+            uiHelper.showToastNotification(`完整导出话题失败: ${error.message}`, 'error');
         }
     }
 

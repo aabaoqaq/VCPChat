@@ -46,7 +46,9 @@ const canvasHandlers = require('./modules/ipc/canvasHandlers'); // Import canvas
 const desktopHandlers = require('./modules/ipc/desktopHandlers'); // Import VCPdesktop handlers
 const desktopRemoteHandlers = require('./modules/ipc/desktopRemoteHandlers'); // Import desktop remote control handlers
 const tavernHandlers = require('./modules/ipc/tavernHandlers'); // Import VCPChatTarven (advanced reply) handlers
+const loomManagerModule = require('./modules/loom/VCPLoomManager');
 const { PRELOAD_ROLES, resolveProjectPreload } = require('./modules/services/preloadPaths');
+const { ChatDataServiceFacade } = require('./modules/services/chatDataService');
 // chokidar is now lazy-loaded
 
 // --- File Watcher ---
@@ -146,7 +148,9 @@ let vcpLogWebSocket;
 let vcpLogReconnectInterval;
 let openChildWindows = [];
 let distributedServer = null; // To hold the distributed server instance
+let chatDataService = null; // Optional VCP-CDS shadow service.
 let appSettingsManager = null;
+let loomManager = null;
 let networkNotesTreeCache = null; // In-memory cache for the network notes
 let cachedModels = []; // Cache for models fetched from VCP server
 const NOTES_MODULE_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'Notemodules');
@@ -302,6 +306,24 @@ async function performQuitCleanup() {
             }
         }
 
+        if (chatDataService) {
+            console.log('[Main] Stopping VCP-CDS...');
+            try {
+                await chatDataService.stop();
+            } finally {
+                chatDataService = null;
+            }
+        }
+
+        if (loomManager) {
+            console.log('[Main] Stopping VCP Loom...');
+            try {
+                await loomManager.shutdown();
+            } finally {
+                loomManager = null;
+            }
+        }
+
         await stopAudioEngine();
     })();
 
@@ -310,7 +332,7 @@ async function performQuitCleanup() {
 
 
 // --- Main Window Creation ---
-function createWindow() {
+function createWindow({ deferLoad = false } = {}) {
     mainWindow = new BrowserWindow({
         width: 1300,
         height: 800,
@@ -329,7 +351,9 @@ function createWindow() {
         show: false, // Don't show until ready
     });
 
-    mainWindow.loadFile('main.html');
+    if (!deferLoad) {
+        loadMainWindow();
+    }
 
     // 拦截主窗口内的直接导航（防止在应用内打开外部网页）
     mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -376,21 +400,6 @@ function createWindow() {
         }
     });
 
-    mainWindow.once('ready-to-show', () => {
-        // Signal the native splash screen to close by creating the ready file.
-        const readyFile = path.join(__dirname, '.vcp_ready');
-        fs.ensureFileSync(readyFile);
-
-        // Clean up the file after a few seconds to prevent it from lingering.
-        setTimeout(() => {
-            if (fs.existsSync(readyFile)) {
-                fs.unlinkSync(readyFile);
-            }
-        }, 3000); // 3-second delay
-
-        mainWindow.show();
-    });
-
     mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
         console.error('[Main] Main window did-fail-load', errorCode, errorDescription, validatedURL);
     });
@@ -417,6 +426,23 @@ function createWindow() {
     });
 
     // Listen for theme changes and notify all relevant windows
+}
+
+function loadMainWindow() {
+    mainWindow.webContents.once('did-finish-load', () => {
+        const readyFile = path.join(__dirname, '.vcp_ready');
+        fs.ensureFileSync(readyFile);
+
+        setTimeout(() => {
+            if (fs.existsSync(readyFile)) {
+                fs.unlinkSync(readyFile);
+            }
+        }, 3000);
+
+        mainWindow.show();
+    });
+
+    return mainWindow.loadFile('main.html');
 }
 
 function createTray() {
@@ -534,7 +560,7 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
     // 排除内部静默调用（内部调用时闪屏早已关闭，无需重复创建，防止破坏冷启动状态）
     const isInternalLaunch = process.argv.includes('--desktop-only') || process.argv.includes('--rag-observer-only');
-    
+
     if (!isInternalLaunch) {
         const readyFile = path.join(__dirname, '.vcp_ready');
         try {
@@ -602,14 +628,20 @@ if (!gotTheLock) {
 
 
     app.whenReady().then(async () => { // Make the function async
-        // 全局处理所有窗口的新窗口打开请求，确保外部链接在系统浏览器中打开
+        // 全局处理普通 VChat 窗口的新窗口请求。VCP Loom 的远程 WebContentsView
+        // 会由 VCPLoomManager 设置自己的隔离导航策略，因此不在这里提前覆盖。
         app.on('web-contents-created', (event, contents) => {
-            contents.setWindowOpenHandler(({ url }) => {
-                if (url.startsWith('http:') || url.startsWith('https:')) {
-                    shell.openExternal(url);
-                    return { action: 'deny' };
-                }
-                return { action: 'allow' };
+            setImmediate(() => {
+                // WebContentsView 不由 BrowserWindow.fromWebContents() 解析，
+                // 因此可与普通 VChat 壳窗口可靠区分。
+                if (contents.isDestroyed() || !BrowserWindow.fromWebContents(contents)) return;
+                contents.setWindowOpenHandler(({ url }) => {
+                    if (url.startsWith('http:') || url.startsWith('https:')) {
+                        shell.openExternal(url);
+                        return { action: 'deny' };
+                    }
+                    return { action: 'allow' };
+                });
             });
         });
 
@@ -642,6 +674,33 @@ if (!gotTheLock) {
         const AgentConfigManager = require('./modules/utils/agentConfigManager');
         appSettingsManager = new AppSettingsManager(SETTINGS_FILE);
         const agentConfigManager = new AgentConfigManager(AGENT_DIR);
+
+        // Phase 1: VCP-CDS runs only as an optional shadow mirror. Start it in
+        // the background so database reconciliation can never delay the window
+        // or the existing history.json chat path.
+        try {
+            const cdsSettings = await appSettingsManager.readSettings();
+            if (cdsSettings.ChatDataServiceEnabled !== false) {
+                chatDataService = new ChatDataServiceFacade({
+                    appDataPath: APP_DATA_ROOT_IN_PROJECT,
+                    enabled: true,
+                    notifyEnabled: cdsSettings.ChatDataServiceNotifyEnabled !== false,
+                    tantivyEnabled: cdsSettings.ChatDataServiceTantivyEnabled !== false,
+                    mobileSyncUseCentralIndex: cdsSettings.MobileSyncUseCentralIndex === true,
+                    logger: console
+                });
+                // 同步消费者依赖 CDS 在分布式插件初始化前 READY；中央迁移启用时
+                // 等待握手，旁路模式仍保持后台启动、不阻塞窗口。
+                if (cdsSettings.MobileSyncUseCentralIndex === true) {
+                    await chatDataService.startShadowMode();
+                } else {
+                    void chatDataService.startShadowMode();
+                }
+            }
+        } catch (error) {
+            chatDataService = null;
+            console.error('[Main] VCP-CDS shadow initialization failed; continuing without it:', error);
+        }
 
         appSettingsManager.startCleanupTimer();
         appSettingsManager.startAutoBackup(USER_DATA_DIR); // Start auto backup
@@ -703,8 +762,8 @@ if (!gotTheLock) {
             }
         }
 
-        // Create the main window first to give immediate feedback to the user.
-        createWindow();
+        // Create the native window first, but load the renderer only after IPC registration.
+        createWindow({ deferLoad: true });
         createTray();
         // --- Application Menu ---
         const isMac = process.platform === 'darwin';
@@ -927,7 +986,7 @@ if (!gotTheLock) {
         windowHandlers.initialize(mainWindow, openChildWindows);
         forumHandlers.initialize({ USER_DATA_DIR }); // Initialize forum handlers
         memoHandlers.initialize({ USER_DATA_DIR }); // Initialize memo handlers
-        
+
         // ⚠️ agentHandlers 必须在 assistantHandlers 之前初始化
         // 因为 assistantHandlers 依赖 getAgentConfigById 函数，该函数需要 AGENT_DIR_CACHE 已被初始化
         agentHandlers.initialize({
@@ -941,7 +1000,7 @@ if (!gotTheLock) {
             settingsManager: appSettingsManager,
             agentConfigManager
         });
-        
+
         await assistantHandlers.initialize({ SETTINGS_FILE });
         fileDialogHandlers.initialize(mainWindow, {
             getSelectionListenerStatus: assistantHandlers.getSelectionListenerStatus,
@@ -992,6 +1051,24 @@ if (!gotTheLock) {
             }
             return { success: false, error: 'File watcher not initialized.' };
         });
+        ipcMain.handle('chat-data-service-status', async () => {
+            if (!chatDataService) {
+                return { status: 'disabled', searchAvailable: false, degraded: true };
+            }
+            return chatDataService.status();
+        });
+
+        ipcMain.handle('chat-data-service-reconcile', async () => {
+            if (!chatDataService?.client) {
+                return { success: false, error: 'VCP-CDS is unavailable.' };
+            }
+            try {
+                return await chatDataService.client.reconcile();
+            } catch (error) {
+                return { success: false, error: error.message, code: error.code };
+            }
+        });
+
         sovitsHandlers.initialize(mainWindow, appSettingsManager); // Initialize SovitsTTS handlers
         musicHandlers.initialize({ mainWindow, openChildWindows, APP_DATA_ROOT_IN_PROJECT, startAudioEngine, stopAudioEngine });
         diceHandlers.initialize({ projectRoot: PROJECT_ROOT });
@@ -1000,6 +1077,12 @@ if (!gotTheLock) {
         emoticonHandlers.setupEmoticonHandlers();
         canvasHandlers.initialize({ mainWindow, openChildWindows, CANVAS_CACHE_DIR });
         desktopHandlers.initialize({ mainWindow, openChildWindows, settingsManager: appSettingsManager });
+        loomManager = await loomManagerModule.initialize({
+            projectRoot: PROJECT_ROOT,
+            appDataRoot: APP_DATA_ROOT_IN_PROJECT,
+            mainWindow,
+            openChildWindows
+        });
         desktopRemoteHandlers.initialize({ mainWindow });
         promptHandlers.initialize({ AGENT_DIR, APP_DATA_ROOT_IN_PROJECT });
         tavernHandlers.initialize({ APP_DATA_ROOT_IN_PROJECT });
@@ -1028,7 +1111,9 @@ if (!gotTheLock) {
                         handleDiceControl: diceHandlers.handleDiceControl, // Inject the dice control handler
                         handleCanvasControl: desktopRemoteHandlers.handleCanvasControl, // Inject the canvas control handler
                         handleFlowlockControl: desktopRemoteHandlers.handleFlowlockControl, // Inject the flowlock control handler
-                        handleDesktopRemoteControl: desktopRemoteHandlers.handleDesktopRemoteControl // Inject the desktop remote control handler
+                        handleDesktopRemoteControl: desktopRemoteHandlers.handleDesktopRemoteControl, // Inject the desktop remote control handler
+                        chatDataService, // Share the Electron-owned VCP-CDS facade with direct plugins.
+                        loomManager // Share the Electron-owned VCP Loom manager with direct plugins.
                     };
                     distributedServer = new DistributedServer(config);
                     await distributedServer.initialize();
@@ -1085,6 +1170,8 @@ if (!gotTheLock) {
         ipcMain.handle('get-platform', () => {
             return process.platform;
         });
+
+        loadMainWindow();
 
         // --- 自动打开桌面窗口 ---
         // 当使用 --desktop-only 参数启动时，在所有 IPC 初始化完成后自动打开桌面窗口

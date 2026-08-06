@@ -138,9 +138,9 @@ export function setupEventListeners(deps) {
                     const contentClone = contentElement.cloneNode(true);
                     contentClone.querySelectorAll('.vcp-thought-chain-bubble').forEach(el => el.remove());
                     let content = contentClone.innerText || contentClone.textContent || "";
-                    // 兜底：清理明文形式思维链
-                    content = content.replace(/\[--- VCP元思考链(?::\s*"[^"]*")?\s*---\][\s\S]*?\[--- 元思考链结束 ---\]/gs, '');
-                    content = content.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '');
+                    // 兜底：仅清理起止标签分别独占一行的明文思维链。
+                    content = content.replace(/^[ \t]*\[--- VCP元思考链(?::\s*"[^"]*")?\s*---\][ \t]*\r?\n[\s\S]*?^[ \t]*\[--- 元思考链结束 ---\][ \t]*(?:\r?\n|$)/gm, '');
+                    content = content.replace(/^[ \t]*<think(?:ing)?>[ \t]*\r?\n[\s\S]*?^[ \t]*<\/think(?:ing)?>[ \t]*(?:\r?\n|$)/gim, '');
                     content = content.trim();
 
                     if (sender && content) {
@@ -453,13 +453,13 @@ export function setupEventListeners(deps) {
             e.preventDefault();
             e.stopPropagation();
 
-            // 检查心流锁是否激活
-            if (window.flowlockManager && window.flowlockManager.getState().isActive) {
-                uiHelperFunctions.showToastNotification('心流锁已启用，无法手动续写', 'warning');
+            const currentSelectedItem = refs.currentSelectedItem.get();
+
+            // 只限制当前 Agent；其他 Agent 的后台心流不影响本界面手动续写。
+            if (window.flowlockManager?.isAgentLocked?.(currentSelectedItem?.id)) {
+                uiHelperFunctions.showToastNotification('当前 Agent 已启用心流锁，无法手动续写', 'warning');
                 return;
             }
-
-            const currentSelectedItem = refs.currentSelectedItem.get();
             const currentTopicId = refs.currentTopicId.get();
             if (!currentSelectedItem.id || !currentTopicId) {
                 uiHelperFunctions.showToastNotification('请先选择一个项目和话题', 'warning');
@@ -1266,15 +1266,82 @@ export function setupEventListeners(deps) {
     if (toggleAssistantBtn) {
         let longPressTimer;
         let wasLongPress = false;
+        let rightLongPressTimer = null;
+        let wasRightLongPress = false;
+
+        const saveSidebarState = () => {
+            if (!chatAPI?.saveSettings) return;
+
+            chatAPI.saveSettings(refs.globalSettings.get()).then(result => {
+                if (!result.success) {
+                    console.error('保存侧边栏状态失败:', result.error);
+                }
+            }).catch(error => {
+                console.error('保存侧边栏状态时出错:', error);
+            });
+        };
+
+        const syncSidebarVisibility = (isActive) => {
+            const mainContent = document.querySelector('.main-content');
+            mainContent?.classList.toggle('sidebar-active', isActive);
+            toggleSidebarBtn?.classList.toggle('active', isActive);
+        };
+
+        const setAvatarOnlyMode = (enabled) => {
+            if (!leftSidebar) return false;
+
+            const agentsTabIsActive = document.getElementById('tabContentAgents')?.classList.contains('active');
+            if (enabled && !agentsTabIsActive) return false;
+
+            leftSidebar.classList.toggle('avatar-only', enabled);
+            if (enabled) {
+                leftSidebar.classList.add('active');
+                syncSidebarVisibility(true);
+            }
+
+            const globalSettings = refs.globalSettings.get();
+            globalSettings.sidebarAvatarOnly = enabled;
+            if (enabled) globalSettings.sidebarActive = true;
+            saveSidebarState();
+            return true;
+        };
+
         toggleAssistantBtn.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return; // Only left click
-            wasLongPress = false;
-            longPressTimer = setTimeout(() => {
-                console.log('[Assistant] Long press detected on toggle button');
-                chatAPI.assistantAction('open');
-                wasLongPress = true;
-                longPressTimer = null;
-            }, 600);
+            if (e.button === 0) {
+                wasLongPress = false;
+                longPressTimer = setTimeout(() => {
+                    console.log('[Assistant] Long press detected on toggle button');
+                    chatAPI.assistantAction('open');
+                    wasLongPress = true;
+                    longPressTimer = null;
+                }, 600);
+                return;
+            }
+
+            if (e.button === 2) {
+                wasRightLongPress = false;
+                rightLongPressTimer = setTimeout(() => {
+                    rightLongPressTimer = null;
+                    if (!leftSidebar) return;
+
+                    wasRightLongPress = true;
+                    leftSidebar.classList.remove('avatar-only', 'compact-topics-open');
+                    document.getElementById('tabContentTopics')?.classList.remove('compact-drawer-open');
+
+                    const isActive = leftSidebar.classList.toggle('active');
+                    syncSidebarVisibility(isActive);
+
+                    const globalSettings = refs.globalSettings.get();
+                    globalSettings.sidebarActive = isActive;
+                    globalSettings.sidebarAvatarOnly = false;
+                    saveSidebarState();
+
+                    uiHelperFunctions.showToastNotification(
+                        `侧栏已${isActive ? '显示' : '隐藏'}`,
+                        'info'
+                    );
+                }, 600);
+            }
         });
 
         const clearLongPress = () => {
@@ -1284,8 +1351,21 @@ export function setupEventListeners(deps) {
             }
         };
 
-        toggleAssistantBtn.addEventListener('mouseup', clearLongPress);
-        toggleAssistantBtn.addEventListener('mouseleave', clearLongPress);
+        const clearRightLongPress = () => {
+            if (rightLongPressTimer) {
+                clearTimeout(rightLongPressTimer);
+                rightLongPressTimer = null;
+            }
+        };
+
+        toggleAssistantBtn.addEventListener('mouseup', (e) => {
+            if (e.button === 0) clearLongPress();
+            if (e.button === 2) clearRightLongPress();
+        });
+        toggleAssistantBtn.addEventListener('mouseleave', () => {
+            clearLongPress();
+            clearRightLongPress();
+        });
 
         toggleAssistantBtn.addEventListener('click', async () => {
             if (wasLongPress) {
@@ -1311,37 +1391,25 @@ export function setupEventListeners(deps) {
             }
         });
 
-        // 右键点击 - 切换侧边栏显示/隐藏
+        // 短按右键在助手页切换完整/头像窄栏；长按右键切换侧栏显示/隐藏。
         toggleAssistantBtn.addEventListener('contextmenu', (e) => {
-            e.preventDefault(); // 阻止默认的右键菜单
-            if (leftSidebar) {
-                const isActive = leftSidebar.classList.toggle('active');
-                const mainContent = document.querySelector('.main-content');
-                if (mainContent) {
-                    mainContent.classList.toggle('sidebar-active', isActive);
-                }
-                // 更新按钮状态
-                if (toggleSidebarBtn) {
-                    toggleSidebarBtn.classList.toggle('active', isActive);
-                }
+            e.preventDefault();
+            clearRightLongPress();
 
-                // 保存侧边栏状态到设置
-                const globalSettings = refs.globalSettings.get();
-                globalSettings.sidebarActive = isActive;
+            if (wasRightLongPress) {
+                wasRightLongPress = false;
+                return;
+            }
 
-                // 异步保存设置
-                if (chatAPI?.saveSettings) {
-                    chatAPI.saveSettings(globalSettings).then(result => {
-                        if (!result.success) {
-                            console.error('保存侧边栏状态失败:', result.error);
-                        }
-                    }).catch(error => {
-                        console.error('保存侧边栏状态时出错:', error);
-                    });
-                }
+            const agentsTabIsActive = document.getElementById('tabContentAgents')?.classList.contains('active');
+            if (!leftSidebar || !agentsTabIsActive) return;
 
-                // 显示操作提示
-                // uiHelperFunctions.showToastNotification(`侧边栏已${isActive ? '显示' : '隐藏'}`, 'info');
+            const enableAvatarOnly = !leftSidebar.classList.contains('avatar-only');
+            if (setAvatarOnlyMode(enableAvatarOnly)) {
+                uiHelperFunctions.showToastNotification(
+                    enableAvatarOnly ? '侧栏已切换为仅头像模式' : '侧栏已恢复完整模式',
+                    'info'
+                );
             }
         });
     }
@@ -1409,9 +1477,9 @@ export function setupEventListeners(deps) {
         if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
             e.preventDefault();
 
-            // 检查心流锁是否激活
-            if (window.flowlockManager && window.flowlockManager.getState().isActive) {
-                uiHelperFunctions.showToastNotification('心流锁已启用，无法手动续写', 'warning');
+            // 只限制当前 Agent；其他 Agent 的后台心流不影响本界面手动续写。
+            if (window.flowlockManager?.isAgentLocked?.(refs.currentSelectedItem.get()?.id)) {
+                uiHelperFunctions.showToastNotification('当前 Agent 已启用心流锁，无法手动续写', 'warning');
                 return;
             }
 
@@ -1472,16 +1540,24 @@ export function setupEventListeners(deps) {
     }
 
     if (seamFixer && notificationsSidebar) {
-        const setSeamFixerWidth = () => {
-            const sidebarWidth = notificationsSidebar.getBoundingClientRect().width;
-            const offset = sidebarWidth > 0 ? 3 : 0;
-            seamFixer.style.right = `${sidebarWidth + offset}px`;
+        let seamFrame = 0;
+        let pendingSidebarWidth = 0;
+
+        const scheduleSeamFixerWidth = (width) => {
+            pendingSidebarWidth = width;
+            if (seamFrame) return;
+
+            seamFrame = requestAnimationFrame(() => {
+                seamFrame = 0;
+                const offset = pendingSidebarWidth > 0 ? 3 : 0;
+                seamFixer.style.right = `${pendingSidebarWidth + offset}px`;
+            });
         };
-        const resizeObserver = new ResizeObserver(setSeamFixerWidth);
+
+        const resizeObserver = new ResizeObserver((entries) => {
+            const entry = entries[entries.length - 1];
+            scheduleSeamFixerWidth(entry?.contentRect?.width || 0);
+        });
         resizeObserver.observe(notificationsSidebar);
-        const mutationObserver = new MutationObserver(setSeamFixerWidth);
-        mutationObserver.observe(notificationsSidebar, { attributes: true, attributeFilter: ['class', 'style'] });
-        setSeamFixerWidth();
     }
 }
-
