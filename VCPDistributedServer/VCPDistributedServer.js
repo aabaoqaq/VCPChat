@@ -57,12 +57,25 @@ class DistributedServer {
         this.handleDesktopRemoteControl = config.handleDesktopRemoteControl; // Inject the desktop remote control handler
         this.chatDataService = config.chatDataService || null; // Shared VCP-CDS facade owned by Electron.
         this.loomManager = config.loomManager || null; // Shared VCP Loom manager owned by Electron.
+        this.scriptoriumAgentControl = config.scriptoriumAgentControl || null;
         this.ws = null;
         this.app = express(); // 创建 Express 应用
         this.server = http.createServer(this.app); // 创建 HTTP 服务器
         this.reconnectInterval = 5000;
-        this.app.use(express.json({ limit: '2mb' }));
-        this.app.use(express.urlencoded({ extended: false, limit: '2mb' }));
+        const defaultJsonParser = express.json({ limit: '2mb' });
+        const defaultUrlencodedParser = express.urlencoded({ extended: false, limit: '2mb' });
+        const isMobileSyncPath = req => req.path === '/api/mobile-sync'
+            || req.path.startsWith('/api/mobile-sync/');
+        // MobileSync owns strict per-route parsers and NDJSON/raw streaming
+        // budgets. Bypassing the generic parser here prevents it from
+        // buffering or rejecting the sync body before the plugin can apply
+        // those limits; every other Chat route keeps the existing 2 MiB cap.
+        this.app.use((req, res, next) => isMobileSyncPath(req)
+            ? next()
+            : defaultJsonParser(req, res, next));
+        this.app.use((req, res, next) => isMobileSyncPath(req)
+            ? next()
+            : defaultUrlencodedParser(req, res, next));
         this.maxReconnectInterval = 60000;
         this.reconnectTimeoutId = null; // To keep track of the reconnect timeout
         this.stopped = false; // Flag to prevent reconnection when stopped manually
@@ -129,7 +142,8 @@ class DistributedServer {
         // 初始化服务类插件，并将主进程持有的共享服务依赖注入 direct 模块。
         await pluginManager.initializeServices(this.app, null, basePath, {
             chatDataService: this.chatDataService,
-            loomManager: this.loomManager
+            loomManager: this.loomManager,
+            scriptoriumAgentControl: this.scriptoriumAgentControl,
         });
         this.registerDiagnosticRoutes();
 

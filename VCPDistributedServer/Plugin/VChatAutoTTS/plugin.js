@@ -28,7 +28,7 @@
     }
 
     function currentAgent() {
-        const item = window.currentSelectedItem;
+        const item = window.VCPMainChatState?.snapshot?.()?.selectedItem;
         return item?.type === 'agent' && item.id ? item : null;
     }
 
@@ -83,6 +83,7 @@
                 speed: agentConfig.ttsSpeed || 1,
                 msgId: messageId,
                 ttsRegex: agentConfig.ttsRegexPrimary,
+                directorPrompts: agentConfig.ttsDirectorPrompts,
                 voiceSecondary: agentConfig.ttsVoiceSecondary,
                 ttsRegexSecondary: agentConfig.ttsRegexSecondary
             });

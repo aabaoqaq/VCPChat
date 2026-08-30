@@ -1,5 +1,37 @@
 // main.js - Electron 主窗口
 
+// Bootstrap-only fatal evidence. The monitor does not consume the exception,
+// so Electron keeps its existing crash behavior while managed/packed launches
+// receive a machine-readable cause instead of a silent ready timeout.
+if (process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID && process.env.VCPCHAT_STATE_DIR) {
+    process.on('uncaughtExceptionMonitor', (error, origin) => {
+        try {
+            const bootstrapFs = require('fs');
+            const bootstrapPath = require('path');
+            const diagnostics = bootstrapPath.join(process.env.VCPCHAT_STATE_DIR, 'diagnostics');
+            bootstrapFs.mkdirSync(diagnostics, { recursive: true });
+            const safeOperationId = process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID.replace(/[^a-z0-9_-]/gi, '-');
+            bootstrapFs.writeFileSync(bootstrapPath.join(diagnostics, `fatal-${safeOperationId}.json`), `${JSON.stringify({
+                schemaVersion: 1,
+                operationId: process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID,
+                origin,
+                name: error?.name || 'Error',
+                message: error?.message || String(error),
+                stack: error?.stack || null,
+                at: new Date().toISOString(),
+            }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+        } catch { /* the original fatal error remains authoritative */ }
+    });
+}
+
+function reportLauncherProgress(stage, progress, message) {
+    if (process.env.VCP_LAUNCHER_PROTOCOL !== '1') return;
+    const payload = JSON.stringify({ stage, progress, message });
+    process.stdout.write(`VCP_STARTUP:${payload}\n`);
+}
+
+reportLauncherProgress('process-started', 0.08, 'VChat 进程已启动');
+
 // --- 模块加载性能诊断 ---
 const originalRequire = require;
 require = function (id) {
@@ -12,18 +44,20 @@ require = function (id) {
     return result;
 };
 
-const { app, BrowserWindow, ipcMain, nativeTheme, globalShortcut, screen, clipboard, shell, dialog, protocol, Tray, Menu } = require('electron'); // Added screen, clipboard, and shell
+const { app, BrowserWindow, ipcMain, nativeTheme, globalShortcut, screen, clipboard, shell, dialog, protocol, Tray, Menu, powerMonitor } = require('electron'); // Added screen, clipboard, and shell
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs-extra'); // Using fs-extra for convenience
 const os = require('os');
 const { spawn } = require('child_process'); // For executing local python
 const { Worker } = require('worker_threads');
+const bootstrapLaunchProtocol = require('./modules/bootstrap/launch-protocol');
 const fileManager = require('./modules/fileManager'); // Import the new file manager
 const groupChat = require('./Groupmodules/groupchat'); // Import the group chat module
 const windowHandlers = require('./modules/ipc/windowHandlers'); // Import window IPC handlers
 const settingsHandlers = require('./modules/ipc/settingsHandlers'); // Import settings IPC handlers
 const fileDialogHandlers = require('./modules/ipc/fileDialogHandlers'); // Import file dialog handlers
+const deepWikiHandlers = require('./modules/ipc/deepWikiHandlers'); // Ask Nova DeepWiki MCP handlers
 const { getAgentConfigById, ...agentHandlers } = require('./modules/ipc/agentHandlers'); // Import agent handlers
 const regexHandlers = require('./modules/ipc/regexHandlers'); // Import regex handlers
 const chatHandlers = require('./modules/ipc/chatHandlers'); // Import chat handlers
@@ -46,22 +80,95 @@ const canvasHandlers = require('./modules/ipc/canvasHandlers'); // Import canvas
 const desktopHandlers = require('./modules/ipc/desktopHandlers'); // Import VCPdesktop handlers
 const desktopRemoteHandlers = require('./modules/ipc/desktopRemoteHandlers'); // Import desktop remote control handlers
 const tavernHandlers = require('./modules/ipc/tavernHandlers'); // Import VCPChatTarven (advanced reply) handlers
+const { ScriptoriumAgentControlService } = require('./modules/services/scriptoriumAgentControlService');
+// docxHandlers 体积较大，在主窗口开始加载后异步预热；首次调用也会按需等待同一加载任务。
+let docxHandlersModule = null;
+let docxHandlersLoadPromise = null;
+let docxHandlersInitializeOptions = null;
+let docxOpenBootstrapRegistered = false;
+
+function loadDocxHandlers() {
+    if (docxHandlersModule) return Promise.resolve(docxHandlersModule);
+    if (docxHandlersLoadPromise) return docxHandlersLoadPromise;
+    if (!docxHandlersInitializeOptions) {
+        return Promise.reject(new Error('[Main] docxHandlers 尚未配置。'));
+    }
+
+    docxHandlersLoadPromise = new Promise((resolve, reject) => {
+        // 将同步 CommonJS 模块解析移出当前初始化调用栈，避免阻塞主窗口创建。
+        setImmediate(() => {
+            try {
+                // 初始化真实模块前移除临时打开桥接，避免重复注册同名 IPC。
+                if (docxOpenBootstrapRegistered) {
+                    ipcMain.removeHandler('open-docx-window');
+                    docxOpenBootstrapRegistered = false;
+                }
+                const handlers = require('./modules/ipc/docxHandlers');
+                handlers.initialize(docxHandlersInitializeOptions);
+                docxHandlersModule = handlers;
+                console.log('[Main] docxHandlers loaded asynchronously.');
+                resolve(handlers);
+            } catch (error) {
+                // 允许后续按需调用重试，同时恢复临时打开入口。
+                docxHandlersLoadPromise = null;
+                registerDocxOpenBootstrap();
+                console.error('[Main] Failed to load docxHandlers:', error);
+                reject(error);
+            }
+        });
+    });
+    return docxHandlersLoadPromise;
+}
+
+function registerDocxOpenBootstrap() {
+    if (docxOpenBootstrapRegistered || docxHandlersModule) return;
+    ipcMain.handle('open-docx-window', async (_event, options = {}) => {
+        const handlers = await loadDocxHandlers();
+        return handlers.openDocxWindow(options);
+    });
+    docxOpenBootstrapRegistered = true;
+}
+
+function configureDocxHandlers(options) {
+    docxHandlersInitializeOptions = options;
+    registerDocxOpenBootstrap();
+}
+
+// 提供稳定对象给控制服务；异步方法在真实模块就绪前自动等待。
+const docxHandlers = {
+    openDocxWindow: (...args) =>
+        loadDocxHandlers().then((handlers) => handlers.openDocxWindow(...args)),
+    requestAgentOperation: (...args) =>
+        loadDocxHandlers().then((handlers) => handlers.requestAgentOperation(...args)),
+    writeProjectArtifact: (...args) =>
+        loadDocxHandlers().then((handlers) => handlers.writeProjectArtifact(...args)),
+    getSystemFonts: (...args) =>
+        loadDocxHandlers().then((handlers) => handlers.getSystemFonts(...args)),
+    getDocxWindow: () => docxHandlersModule?.getDocxWindow() || null,
+};
 const loomManagerModule = require('./modules/loom/VCPLoomManager');
 const { PRELOAD_ROLES, resolveProjectPreload } = require('./modules/services/preloadPaths');
+const { createEmbeddedAppSessionManager } = require('./modules/services/embeddedAppSessionManager');
+const { SenderTaskRegistry } = require('./modules/services/senderTaskRegistry');
 const { ChatDataServiceFacade } = require('./modules/services/chatDataService');
+const { createHistoryWatcherLeaseManager } = require('./modules/services/historyWatcherLeaseManager');
 // chokidar is now lazy-loaded
 
 // --- File Watcher ---
 let historyWatcher = null;
+let embeddedAppSessions = null;
+let embeddedAppTasks = null;
 let lastInternalSaveTime = 0; // 🔧 改为时间戳记录
 let internalSaveTimeout = null; // 🔧 超时保护
 let isEditingInProgress = false; // 🔧 编辑状态标识
 const INTERNAL_SAVE_WINDOW_MS = 2000; // 🔧 内部保存时间窗口（2秒）
 
 const fileWatcher = {
-    watchFile: (filePath, callback) => {
+    watchFile: async (filePath, callback) => {
         if (historyWatcher) {
-            historyWatcher.close();
+            const watcherToClose = historyWatcher;
+            historyWatcher = null;
+            await watcherToClose.close();
         }
         console.log(`[FileWatcher] Watching new file: ${filePath}`);
         const chokidar = require('chokidar'); // Lazy load
@@ -87,11 +194,12 @@ const fileWatcher = {
         });
         historyWatcher.on('error', error => console.error(`[FileWatcher] Error: ${error}`));
     },
-    stopWatching: () => {
+    stopWatching: async () => {
         if (historyWatcher) {
             console.log('[FileWatcher] Stopping file watch.');
-            historyWatcher.close();
+            const watcherToClose = historyWatcher;
             historyWatcher = null;
+            await watcherToClose.close();
         }
         // 🔧 清理状态
         isEditingInProgress = false;
@@ -122,10 +230,39 @@ const fileWatcher = {
         console.log(`[FileWatcher] Editing mode set to: ${editing}`);
     }
 };
+
+const historyWatcherLeases = createHistoryWatcherLeaseManager({
+    startWatching: ({ filePath, callback }) => fileWatcher.watchFile(filePath, callback),
+    stopWatching: () => fileWatcher.stopWatching()
+});
+const historyWatcherSenderOwners = new WeakMap();
+let historyWatcherSenderSequence = 0;
+
+function getHistoryWatcherOwner(sender) {
+    const existing = historyWatcherSenderOwners.get(sender);
+    if (existing) return existing;
+    // Electron may reuse numeric WebContents IDs. Include a main-process
+    // generation so a late destroyed event cannot revoke a newer renderer.
+    const ownerId = `${sender.id}:${++historyWatcherSenderSequence}`;
+    historyWatcherSenderOwners.set(sender, ownerId);
+    sender.once('destroyed', () => {
+        void historyWatcherLeases.revoke(ownerId).catch((error) => {
+            console.warn('[FileWatcher] Failed to release destroyed renderer lease:', error);
+        });
+    });
+    return ownerId;
+}
 // --- Configuration Paths ---
 // Data storage will be within the project's 'AppData' directory
 const PROJECT_ROOT = __dirname; // __dirname is the directory of main.js
-const APP_DATA_ROOT_IN_PROJECT = path.join(PROJECT_ROOT, 'AppData');
+const isolatedAppDataRoot = process.env.VCPCHAT_APP_DATA_DIR?.trim();
+if (isolatedAppDataRoot) app.setPath('userData', path.resolve(isolatedAppDataRoot));
+const APP_DATA_ROOT_IN_PROJECT = isolatedAppDataRoot
+    ? path.resolve(isolatedAppDataRoot)
+    : path.join(PROJECT_ROOT, 'AppData');
+const NATIVE_SPLASH_READY_FILE = app.isPackaged
+    ? path.join(APP_DATA_ROOT_IN_PROJECT, '.vcp_ready')
+    : path.join(__dirname, '.vcp_ready');
 
 const AGENT_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'Agents');
 const USER_DATA_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'UserData'); // For chat histories and attachments
@@ -148,9 +285,11 @@ let vcpLogWebSocket;
 let vcpLogReconnectInterval;
 let openChildWindows = [];
 let distributedServer = null; // To hold the distributed server instance
+let distributedServerStartPromise = null;
 let chatDataService = null; // Optional VCP-CDS shadow service.
 let appSettingsManager = null;
 let loomManager = null;
+let scriptoriumAgentControl = null;
 let networkNotesTreeCache = null; // In-memory cache for the network notes
 let cachedModels = []; // Cache for models fetched from VCP server
 const NOTES_MODULE_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'Notemodules');
@@ -160,6 +299,211 @@ let audioEngineStopPromise = null;
 let isAudioEngineStopping = false;
 let appQuitCleanupPromise = null;
 let isFinalizingQuit = false;
+const MAIN_RENDERER_CRASH_WINDOW_MS = 60_000;
+const MAIN_RENDERER_STABLE_RESET_MS = 30_000;
+const MAIN_RENDERER_MAX_RECOVERIES = 3;
+let mainRendererCrashTimes = [];
+let mainRendererRecoveryTimer = null;
+let mainRendererStableTimer = null;
+let mainRendererFailurePromptOpen = false;
+const managedBootstrapOperationId = process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID?.trim() || null;
+const managedBootstrapStateRoot = process.env.VCPCHAT_STATE_DIR?.trim() || null;
+const nativeLauncherProgressEnabled = process.env.VCP_LAUNCHER_PROTOCOL === '1';
+let managedBootstrapReadyPublished = false;
+let nativeLauncherReadyReported = false;
+
+function publishManagedBootstrapReady(checks) {
+    if (!managedBootstrapOperationId || !managedBootstrapStateRoot || managedBootstrapReadyPublished) return false;
+    try {
+        bootstrapLaunchProtocol.writeReadyRecord({
+            stateRoot: managedBootstrapStateRoot,
+            operationId: managedBootstrapOperationId,
+            buildId: process.env.VCPCHAT_BUILD_ID?.trim() || null,
+            checks,
+        });
+        managedBootstrapReadyPublished = true;
+        console.log(`[Main] Published managed bootstrap ready for ${managedBootstrapOperationId}.`);
+        return true;
+    } catch (error) {
+        console.warn('[Main] Failed to publish managed bootstrap ready:', error.message);
+        return false;
+    }
+}
+
+async function publishManagedBootstrapReadyAfterRenderer() {
+    const managedReadyPending =
+        Boolean(managedBootstrapOperationId && managedBootstrapStateRoot) &&
+        !managedBootstrapReadyPublished;
+    const nativeLauncherReadyPending =
+        nativeLauncherProgressEnabled && !nativeLauncherReadyReported;
+    const distributedServerReadyPending =
+        !distributedServerStartPromise && !distributedServer;
+    if (
+        (!managedReadyPending && !nativeLauncherReadyPending && !distributedServerReadyPending) ||
+        !mainWindow ||
+        mainWindow.isDestroyed()
+    ) return;
+
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline && mainWindow && !mainWindow.isDestroyed()) {
+        try {
+            const ready = await mainWindow.webContents.executeJavaScript(
+                "document.documentElement.dataset.vcpRendererReady === 'true'",
+                true
+            );
+            if (ready) {
+                if (mainWindow.isMinimized()) mainWindow.restore();
+                if (!mainWindow.isVisible()) mainWindow.show();
+                mainWindow.focus();
+                mainWindow.moveTop();
+                if (!mainWindow.isVisible()) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    continue;
+                }
+                if (managedReadyPending) {
+                    publishManagedBootstrapReady({
+                        mainWindow: 'visible',
+                        preload: 'ready',
+                        renderer: 'ready',
+                    });
+                }
+                if (nativeLauncherReadyPending) {
+                    nativeLauncherReadyReported = true;
+                    reportLauncherProgress('renderer-ready', 1, '准备完成');
+                }
+                // MobileSync 的首次索引可能包含大量同步 SQLite/哈希工作。
+                // 必须在真实渲染就绪和 Splash 完成信号之后再启动，避免与首屏争抢
+                // Electron 主线程；后续启动由 history_source_state 差异化跳过。
+                setImmediate(() => {
+                    void startDistributedServerAfterRenderer();
+                });
+                return;
+            }
+        } catch (error) {
+            if (mainWindow?.webContents?.isDestroyed()) return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    console.warn('[Main] Renderer did not reach launcher readiness before the publication deadline.');
+}
+
+function clearMainRendererRecoveryTimers() {
+    if (mainRendererRecoveryTimer) clearTimeout(mainRendererRecoveryTimer);
+    if (mainRendererStableTimer) clearTimeout(mainRendererStableTimer);
+    mainRendererRecoveryTimer = null;
+    mainRendererStableTimer = null;
+}
+
+function markMainRendererStable() {
+    void publishManagedBootstrapReadyAfterRenderer();
+    if (mainRendererStableTimer) clearTimeout(mainRendererStableTimer);
+    mainRendererStableTimer = setTimeout(() => {
+        mainRendererCrashTimes = [];
+        mainRendererStableTimer = null;
+    }, MAIN_RENDERER_STABLE_RESET_MS);
+}
+
+async function showMainRendererFailurePrompt(details) {
+    if (mainRendererFailurePromptOpen || isFinalizingQuit || app.isQuitting) return;
+    mainRendererFailurePromptOpen = true;
+    try {
+        const options = {
+            type: 'error',
+            title: 'VCPChat 界面连续崩溃',
+            message: '主界面在短时间内多次异常退出，已停止自动恢复以避免崩溃循环。',
+            detail: details?.reason ? `最后一次退出原因：${details.reason}` : '',
+            buttons: ['重试一次', '退出应用'],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true,
+        };
+        const result = mainWindow && !mainWindow.isDestroyed()
+            ? await dialog.showMessageBox(mainWindow, options)
+            : await dialog.showMessageBox(options);
+        if (result.response === 0 && mainWindow && !mainWindow.isDestroyed()) {
+            mainRendererCrashTimes = [];
+            scheduleMainRendererRecovery({ reason: 'manual-retry' });
+        } else {
+            app.quit();
+        }
+    } finally {
+        mainRendererFailurePromptOpen = false;
+    }
+}
+
+function scheduleMainRendererRecovery(details = {}) {
+    if (isFinalizingQuit || app.isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
+    if (mainRendererRecoveryTimer) return;
+    const now = Date.now();
+    mainRendererCrashTimes = mainRendererCrashTimes.filter(timestamp => now - timestamp < MAIN_RENDERER_CRASH_WINDOW_MS);
+    if (mainRendererCrashTimes.length >= MAIN_RENDERER_MAX_RECOVERIES) {
+        void showMainRendererFailurePrompt(details);
+        return;
+    }
+    mainRendererCrashTimes.push(now);
+    mainRendererRecoveryTimer = setTimeout(() => {
+        mainRendererRecoveryTimer = null;
+        if (isFinalizingQuit || app.isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
+        console.warn(`[Main] Recovering main renderer (${mainRendererCrashTimes.length}/${MAIN_RENDERER_MAX_RECOVERIES}) after ${details.reason || 'unknown failure'}.`);
+        mainWindow.loadFile('main.html').catch(error => {
+            console.error('[Main] Failed to recover main renderer:', error);
+            scheduleMainRendererRecovery({ reason: 'reload-failed' });
+        });
+    }, 250);
+}
+
+function startDistributedServerAfterRenderer() {
+    if (distributedServerStartPromise || distributedServer || isFinalizingQuit || app.isQuitting) {
+        return distributedServerStartPromise;
+    }
+
+    distributedServerStartPromise = (async () => {
+        try {
+            const settings = await appSettingsManager?.readSettings();
+            if (!settings?.enableDistributedServer) {
+                console.log('[Main] Distributed server is disabled in settings.');
+                return null;
+            }
+            if (isFinalizingQuit || app.isQuitting || !mainWindow || mainWindow.isDestroyed()) {
+                return null;
+            }
+
+            console.log('[Main] Renderer is ready. Initializing distributed server in the background...');
+            const DistributedServer = require('./VCPDistributedServer/VCPDistributedServer.js');
+            const server = new DistributedServer({
+                mainServerUrl: settings.vcpLogUrl,
+                vcpKey: settings.vcpLogKey,
+                serverName: 'VCPChat-Desktop-Client-Distributed-Server',
+                debugMode: true,
+                rendererProcess: mainWindow.webContents,
+                handleMusicControl: musicHandlers.handleMusicControl,
+                handleDiceControl: diceHandlers.handleDiceControl,
+                handleCanvasControl: desktopRemoteHandlers.handleCanvasControl,
+                handleFlowlockControl: desktopRemoteHandlers.handleFlowlockControl,
+                handleDesktopRemoteControl: desktopRemoteHandlers.handleDesktopRemoteControl,
+                chatDataService,
+                loomManager,
+                scriptoriumAgentControl
+            });
+            distributedServer = server;
+            await server.initialize();
+            return server;
+        } catch (error) {
+            distributedServer = null;
+            console.error('[Main] Failed to initialize distributed server after renderer readiness:', error);
+            return null;
+        }
+    })();
+
+    return distributedServerStartPromise;
+}
+
+function toggleDevToolsForWindow(focusedWindow) {
+    if (!focusedWindow || focusedWindow.isDestroyed()) return;
+    if (loomManager?.toggleDevToolsForWindow(focusedWindow)) return;
+    const contents = focusedWindow.webContents;
+    if (contents && !contents.isDestroyed()) contents.toggleDevTools();
+}
 
 // --- Audio Engine Management ---
 // Now uses the Rust native audio engine instead of Python
@@ -174,7 +518,16 @@ function startAudioEngine() {
 
         // Use the Rust audio server binary (moved to audio_engine directory)
         const binaryName = process.platform === 'win32' ? 'audio_server.exe' : 'audio_server';
-        const rustBinaryPath = path.join(__dirname, 'audio_engine', binaryName);
+        const platformDirectory = `${process.platform}-${process.arch}`;
+        const audioRoot = app.isPackaged
+            ? path.join(process.resourcesPath, 'app.asar.unpacked', 'audio_engine')
+            : path.join(__dirname, 'audio_engine');
+        const platformBinaryPath = path.join(audioRoot, 'bin', platformDirectory, binaryName);
+        const legacyBinaryPath = path.join(audioRoot, binaryName);
+        const legacyMatchesPlatform = process.platform === 'win32' || (process.platform === 'linux' && process.arch === 'x64');
+        const rustBinaryPath = fs.existsSync(platformBinaryPath)
+            ? platformBinaryPath
+            : legacyMatchesPlatform ? legacyBinaryPath : platformBinaryPath;
         console.log(`[Main] Starting Rust Audio Engine from: ${rustBinaryPath}`);
 
         // Check if the binary exists
@@ -297,6 +650,8 @@ async function performQuitCleanup() {
     }
 
     appQuitCleanupPromise = (async () => {
+        await historyWatcherLeases.dispose();
+
         if (distributedServer) {
             console.log('[Main] Stopping distributed server...');
             try {
@@ -394,6 +749,8 @@ function createWindow({ deferLoad = false } = {}) {
     mainWindow.on('closed', () => {
         // When the main window is closed, we should only quit on non-macOS
         // when there are no remaining windows (e.g. RAG Observer may still be open).
+        clearMainRendererRecoveryTimers();
+        mainRendererCrashTimes = [];
         mainWindow = null;
         if (process.platform !== 'darwin' && BrowserWindow.getAllWindows().length === 0) {
             app.quit();
@@ -404,9 +761,21 @@ function createWindow({ deferLoad = false } = {}) {
         console.error('[Main] Main window did-fail-load', errorCode, errorDescription, validatedURL);
     });
 
-    mainWindow.webContents.on('render-process-gone', (event, details) => {
-        console.error('[Main] Main window render-process-gone', details);
+    mainWindow.webContents.on('did-start-loading', () => {
+        embeddedAppSessions?.suspend?.();
     });
+
+    mainWindow.webContents.on('render-process-gone', (event, details) => {
+        embeddedAppSessions?.suspend?.();
+        if (mainRendererStableTimer) {
+            clearTimeout(mainRendererStableTimer);
+            mainRendererStableTimer = null;
+        }
+        console.error('[Main] Main window render-process-gone', details);
+        if (details?.reason !== 'clean-exit') scheduleMainRendererRecovery(details);
+    });
+
+    mainWindow.webContents.on('did-finish-load', markMainRendererStable);
 
     // mainWindow.setMenu(null); // 移除应用程序菜单栏 - 注释掉以启用macOS的标准菜单
 
@@ -430,7 +799,7 @@ function createWindow({ deferLoad = false } = {}) {
 
 function loadMainWindow() {
     mainWindow.webContents.once('did-finish-load', () => {
-        const readyFile = path.join(__dirname, '.vcp_ready');
+        const readyFile = NATIVE_SPLASH_READY_FILE;
         fs.ensureFileSync(readyFile);
 
         setTimeout(() => {
@@ -555,14 +924,28 @@ function createTray() {
 
 
 // --- App Lifecycle ---
-const gotTheLock = app.requestSingleInstanceLock();
+const gotTheLock = process.argv.includes('--allow-multiple-instances') || app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
+    // Tell the managed bootstrapper why this child exits before publishing
+    // ready. This is an expected single-instance handoff, not a crash.
+    if (process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID && process.env.VCPCHAT_STATE_DIR) {
+        try {
+            const bootstrapFs = require('fs');
+            const bootstrapPath = require('path');
+            const markerPath = bootstrapPath.join(process.env.VCPCHAT_STATE_DIR, `already-running-${process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID}.json`);
+            bootstrapFs.mkdirSync(process.env.VCPCHAT_STATE_DIR, { recursive: true });
+            bootstrapFs.writeFileSync(markerPath, JSON.stringify({
+                operationId: process.env.VCPCHAT_BOOTSTRAP_OPERATION_ID,
+                at: new Date().toISOString(),
+            }), { encoding: 'utf8', flag: 'wx' });
+        } catch { /* single-instance exit remains authoritative */ }
+    }
     // 排除内部静默调用（内部调用时闪屏早已关闭，无需重复创建，防止破坏冷启动状态）
     const isInternalLaunch = process.argv.includes('--desktop-only') || process.argv.includes('--rag-observer-only');
 
     if (!isInternalLaunch) {
-        const readyFile = path.join(__dirname, '.vcp_ready');
+        const readyFile = NATIVE_SPLASH_READY_FILE;
         try {
             fs.ensureFileSync(readyFile);
             console.log('[Main] Second instance signaled NativeSplash to close.');
@@ -571,12 +954,15 @@ if (!gotTheLock) {
             console.warn('[Main] Failed to create .vcp_ready in second instance:', err.message);
         }
     }
+    // Another primary instance cannot prove that this operation's project
+    // window rendered. Let the managed launcher observe this child exit rather
+    // than publishing a false ready record and closing the setup UI.
     app.quit();
 } else {
     app.on('second-instance', async (event, commandLine, workingDirectory) => {
         // 当第一实例被第二实例唤醒时，延迟 1.5 秒清理可能由第二实例创建的信号文件。
         // 1.5 秒足够 Rust 闪屏端（200ms轮询）检测并退出，且能 100% 避免冷启动信号残留。
-        const readyFile = path.join(__dirname, '.vcp_ready');
+        const readyFile = NATIVE_SPLASH_READY_FILE;
         setTimeout(() => {
             try {
                 if (fs.existsSync(readyFile)) {
@@ -611,6 +997,11 @@ if (!gotTheLock) {
         // 默认聚焦主窗口
         if (mainWindow && !mainWindow.isDestroyed()) {
             if (mainWindow.isMinimized()) mainWindow.restore();
+            // macOS deliberately hides the main window when it is closed. A
+            // managed launcher handoff must make that existing instance
+            // visible again, otherwise Recovery exits while the app remains
+            // running invisibly in the background.
+            if (!mainWindow.isVisible()) mainWindow.show();
             mainWindow.focus();
             return;
         }
@@ -628,6 +1019,7 @@ if (!gotTheLock) {
 
 
     app.whenReady().then(async () => { // Make the function async
+        reportLauncherProgress('electron-ready', 0.16, 'Electron 核心已就绪');
         // 全局处理普通 VChat 窗口的新窗口请求。VCP Loom 的远程 WebContentsView
         // 会由 VCPLoomManager 设置自己的隔离导航策略，因此不在这里提前覆盖。
         app.on('web-contents-created', (event, contents) => {
@@ -654,7 +1046,7 @@ if (!gotTheLock) {
         // The native splash screen is started by the batch file, so no action is needed here.
 
         // Pre-warm the audio engine in the background. This doesn't block the main window.
-        startAudioEngine().catch(err => {
+        if (process.env.VCPCHAT_E2E_TEST !== '1') startAudioEngine().catch(err => {
             console.error('[Main] Failed to pre-warm audio engine on startup:', err);
             // We don't need to show a dialog here, as it will be handled when the
             // music window is actually opened.
@@ -667,6 +1059,7 @@ if (!gotTheLock) {
         fs.ensureDirSync(WALLPAPER_THUMBNAIL_CACHE_DIR); // Ensure the thumbnail cache directory exists
         fs.ensureDirSync(RESAMPLE_CACHE_DIR); // Ensure the resample cache directory exists
         fs.ensureDirSync(CANVAS_CACHE_DIR); // Ensure the canvas cache directory exists
+        reportLauncherProgress('storage-ready', 0.27, '配置与数据目录已就绪');
         fileManager.initializeFileManager(USER_DATA_DIR, AGENT_DIR); // Initialize FileManager
         groupChat.initializePaths({ APP_DATA_ROOT_IN_PROJECT, AGENT_DIR, USER_DATA_DIR, SETTINGS_FILE }); // Initialize GroupChat paths
 
@@ -686,16 +1079,13 @@ if (!gotTheLock) {
                     enabled: true,
                     notifyEnabled: cdsSettings.ChatDataServiceNotifyEnabled !== false,
                     tantivyEnabled: cdsSettings.ChatDataServiceTantivyEnabled !== false,
-                    mobileSyncUseCentralIndex: cdsSettings.MobileSyncUseCentralIndex === true,
+                    mobileSyncUseCentralIndex: cdsSettings.MobileSyncUseCentralIndex !== false,
                     logger: console
                 });
-                // 同步消费者依赖 CDS 在分布式插件初始化前 READY；中央迁移启用时
-                // 等待握手，旁路模式仍保持后台启动、不阻塞窗口。
-                if (cdsSettings.MobileSyncUseCentralIndex === true) {
-                    await chatDataService.startShadowMode();
-                } else {
-                    void chatDataService.startShadowMode();
-                }
+                // CDS health must never delay the normal Chat window. The
+                // MobileSync plugin awaits this same idempotent start promise
+                // only when a new central-sync session is opened.
+                void chatDataService.startShadowMode();
             }
         } catch (error) {
             chatDataService = null;
@@ -720,6 +1110,7 @@ if (!gotTheLock) {
             createTray();
 
             await ragHandlers.openRagObserverWindow();
+            publishManagedBootstrapReady({ mainWindow: 'ready', preload: 'ready', renderer: 'ready', surface: 'rag-observer' });
             return;
         }
 
@@ -765,6 +1156,7 @@ if (!gotTheLock) {
         // Create the native window first, but load the renderer only after IPC registration.
         createWindow({ deferLoad: true });
         createTray();
+        reportLauncherProgress('window-created', 0.38, '主窗口骨架已创建');
         // --- Application Menu ---
         const isMac = process.platform === 'darwin';
         const menuTemplate = [
@@ -866,10 +1258,8 @@ if (!gotTheLock) {
                     {
                         label: '切换开发者工具',
                         accelerator: 'Ctrl+Shift+I',
-                        click: (item, focusedWindow) => {
-                            if (focusedWindow) {
-                                focusedWindow.webContents.toggleDevTools();
-                            }
+                        click: (_item, focusedWindow) => {
+                            toggleDevToolsForWindow(focusedWindow);
                         }
                     }
                 ]
@@ -1002,12 +1392,14 @@ if (!gotTheLock) {
         });
 
         await assistantHandlers.initialize({ SETTINGS_FILE });
+        reportLauncherProgress('assistant-ready', 0.56, '小助手已经醒来');
         fileDialogHandlers.initialize(mainWindow, {
             getSelectionListenerStatus: assistantHandlers.getSelectionListenerStatus,
             stopSelectionListener: assistantHandlers.stopSelectionListener,
             startSelectionListener: assistantHandlers.startSelectionListener,
             openChildWindows
         });
+        deepWikiHandlers.initialize({ mainWindow });
         groupChatHandlers.initialize(mainWindow, {
             AGENT_DIR,
             USER_DATA_DIR,
@@ -1030,26 +1422,45 @@ if (!gotTheLock) {
             agentConfigManager
         });
 
-        // New dedicated watcher IPC handlers
-        ipcMain.handle('watcher:start', (event, filePath, agentId, topicId) => {
-            if (fileWatcher) {
-                fileWatcher.watchFile(filePath, (changedPath) => {
-                    if (mainWindow && !mainWindow.isDestroyed()) {
-                        // Pass back the agentId and topicId to the renderer for context
-                        mainWindow.webContents.send('history-file-updated', { path: changedPath, agentId, topicId });
-                    }
-                });
-                return { success: true, watching: filePath };
-            }
-            return { success: false, error: 'File watcher not initialized.' };
+        // A renderer claims a lease before beginning asynchronous selection.
+        // Late start/stop completions from older selections are rejected in
+        // the main process, where the single chokidar watcher is actually
+        // owned.
+        ipcMain.handle('watcher:begin', async (event) => {
+            const ownerId = getHistoryWatcherOwner(event.sender);
+            const lease = historyWatcherLeases.claim(ownerId);
+            const stopped = await lease.stopped;
+            return { success: stopped.success, stale: stopped.stale === true, token: lease.token };
         });
 
-        ipcMain.handle('watcher:stop', () => {
-            if (fileWatcher) {
-                fileWatcher.stopWatching();
-                return { success: true };
+        ipcMain.handle('watcher:start', async (event, filePath, agentId, topicId, leaseToken = null) => {
+            const ownerId = getHistoryWatcherOwner(event.sender);
+            let token = leaseToken;
+            if (!token) {
+                const lease = historyWatcherLeases.claim(ownerId);
+                token = lease.token;
+                await lease.stopped;
             }
-            return { success: false, error: 'File watcher not initialized.' };
+            const sender = event.sender;
+            const result = await historyWatcherLeases.start(ownerId, token, {
+                filePath,
+                callback: (changedPath) => {
+                    if (!sender.isDestroyed()) {
+                        sender.send('history-file-updated', { path: changedPath, agentId, topicId });
+                    }
+                }
+            });
+            return { ...result, token, watching: result.success ? filePath : null };
+        });
+
+        ipcMain.handle('watcher:stop', async (event, leaseToken = null) => {
+            const ownerId = getHistoryWatcherOwner(event.sender);
+            if (!leaseToken) {
+                const lease = historyWatcherLeases.claim(ownerId);
+                const result = await lease.stopped;
+                return { ...result, token: lease.token };
+            }
+            return historyWatcherLeases.stop(ownerId, leaseToken);
         });
         ipcMain.handle('chat-data-service-status', async () => {
             if (!chatDataService) {
@@ -1076,7 +1487,112 @@ if (!gotTheLock) {
         emoticonHandlers.initialize({ SETTINGS_FILE, APP_DATA_ROOT_IN_PROJECT });
         emoticonHandlers.setupEmoticonHandlers();
         canvasHandlers.initialize({ mainWindow, openChildWindows, CANVAS_CACHE_DIR });
-        desktopHandlers.initialize({ mainWindow, openChildWindows, settingsManager: appSettingsManager });
+        configureDocxHandlers({
+            mainWindow,
+            openChildWindows,
+            projectRoot: PROJECT_ROOT,
+            appDataRoot: APP_DATA_ROOT_IN_PROJECT
+        });
+        scriptoriumAgentControl = new ScriptoriumAgentControlService().initialize({
+            appDataRoot: APP_DATA_ROOT_IN_PROJECT,
+            documentHandlers: docxHandlers,
+            logger: console,
+        });
+        desktopHandlers.initialize({
+            mainWindow,
+            openChildWindows,
+            settingsManager: appSettingsManager,
+            APP_DATA_ROOT_IN_PROJECT,
+        });
+        await embeddedAppSessions?.closeAll();
+        embeddedAppTasks?.dispose('main-window-reinitialized');
+        embeddedAppTasks = new SenderTaskRegistry({ label: 'embedded-app-tasks' });
+        embeddedAppSessions = createEmbeddedAppSessionManager({
+            mainWindow,
+            powerMonitor,
+            launchStandalone: desktopHandlers.launchVchatApp,
+        });
+        [
+            'embedded-vchat-app:create',
+            'embedded-vchat-app:list',
+            'embedded-vchat-app:activate',
+            'embedded-vchat-app:set-bounds',
+            'embedded-vchat-app:close',
+            'embedded-vchat-app:detach',
+            'embedded-vchat-app:close-all',
+            'embedded-vchat-app:cancel',
+            'lifecycle:get-main-snapshot',
+        ].forEach(channel => ipcMain.removeHandler(channel));
+        const normalizeEmbeddedRequest = (payload, fallbackPoint = undefined) => (
+            payload && typeof payload === 'object' && !Array.isArray(payload)
+                ? { requestId: String(payload.requestId || ''), action: payload.action, point: payload.point }
+                : { requestId: '', action: payload, point: fallbackPoint }
+        );
+        const runEmbeddedTask = async (event, request, operation, execute) => {
+            if (!request.requestId) return execute(null);
+            try {
+                return await embeddedAppTasks.run(event.sender, request.requestId, operation, execute);
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        };
+        ipcMain.handle('embedded-vchat-app:create', (event, payload) => {
+            embeddedAppSessions.assertMainRenderer(event);
+            const request = normalizeEmbeddedRequest(payload);
+            return runEmbeddedTask(event, request, 'embedded:create', signal => (
+                embeddedAppSessions.create(request.action, { signal })
+            ));
+        });
+        ipcMain.handle('embedded-vchat-app:list', event => {
+            embeddedAppSessions.assertMainRenderer(event);
+            return embeddedAppSessions.list();
+        });
+        ipcMain.handle('embedded-vchat-app:activate', (event, appAction) => {
+            embeddedAppSessions.assertMainRenderer(event);
+            return embeddedAppSessions.activate(appAction || null);
+        });
+        ipcMain.handle('embedded-vchat-app:set-bounds', (event, appAction, bounds) => {
+            embeddedAppSessions.assertMainRenderer(event);
+            return embeddedAppSessions.setBounds(appAction, bounds);
+        });
+        ipcMain.handle('embedded-vchat-app:close', (event, payload) => {
+            embeddedAppSessions.assertMainRenderer(event);
+            const request = normalizeEmbeddedRequest(payload);
+            return runEmbeddedTask(event, request, 'embedded:close', () => embeddedAppSessions.close(request.action));
+        });
+        ipcMain.handle('embedded-vchat-app:detach', (event, payload, legacyPoint) => {
+            embeddedAppSessions.assertMainRenderer(event);
+            const request = normalizeEmbeddedRequest(payload, legacyPoint);
+            return runEmbeddedTask(event, request, 'embedded:detach', signal => (
+                embeddedAppSessions.detach(request.action, request.point, { signal })
+            ));
+        });
+        ipcMain.handle('embedded-vchat-app:cancel', (event, requestId) => {
+            embeddedAppSessions.assertMainRenderer(event);
+            return { success: true, cancelled: embeddedAppTasks.cancel(event.sender, requestId, 'renderer-cancelled') };
+        });
+        ipcMain.handle('lifecycle:get-main-snapshot', event => {
+            embeddedAppSessions.assertMainRenderer(event);
+            const embedded = embeddedAppSessions.list();
+            return {
+                embeddedSessions: embedded.sessions,
+                activeEmbeddedAction: embedded.activeAction,
+                tasks: embeddedAppTasks.snapshot(),
+                chatTasks: chatHandlers.getVcpStreamTaskSnapshot(),
+            };
+        });
+        ipcMain.handle('embedded-vchat-app:close-all', async event => {
+            embeddedAppSessions.assertMainRenderer(event);
+            await embeddedAppSessions.closeAll();
+            return { success: true };
+        });
+        ipcMain.removeAllListeners('embedded-vchat-app:request-close');
+        ipcMain.on('embedded-vchat-app:request-close', async event => {
+            const result = await embeddedAppSessions?.closeBySender(event.sender);
+            if (!result?.success) {
+                console.warn('[EmbeddedApps] Rejected child close request:', result?.error || 'unknown sender');
+            }
+        });
         loomManager = await loomManagerModule.initialize({
             projectRoot: PROJECT_ROOT,
             appDataRoot: APP_DATA_ROOT_IN_PROJECT,
@@ -1084,6 +1600,7 @@ if (!gotTheLock) {
             openChildWindows
         });
         desktopRemoteHandlers.initialize({ mainWindow });
+        reportLauncherProgress('workspace-ready', 0.76, '工作空间与功能模块已连接');
         promptHandlers.initialize({ AGENT_DIR, APP_DATA_ROOT_IN_PROJECT });
         tavernHandlers.initialize({ APP_DATA_ROOT_IN_PROJECT });
         voiceHandlers.initialize({ mainWindow, openChildWindows, settingsManager: appSettingsManager, projectRoot: PROJECT_ROOT });
@@ -1094,38 +1611,8 @@ if (!gotTheLock) {
             }
         });
 
-        // --- Distributed Server Initialization ---
-        (async () => {
-            try {
-                const settings = await appSettingsManager.readSettings();
-                if (settings.enableDistributedServer) {
-                    console.log('[Main] Distributed server is enabled. Initializing...');
-                    const DistributedServer = require('./VCPDistributedServer/VCPDistributedServer.js');
-                    const config = {
-                        mainServerUrl: settings.vcpLogUrl, // Assuming the distributed server connects to the same base URL as VCPLog
-                        vcpKey: settings.vcpLogKey,
-                        serverName: 'VCPChat-Desktop-Client-Distributed-Server',
-                        debugMode: true, // Or read from settings if you add this option
-                        rendererProcess: mainWindow.webContents, // Pass the renderer process object
-                        handleMusicControl: musicHandlers.handleMusicControl, // Inject the music control handler
-                        handleDiceControl: diceHandlers.handleDiceControl, // Inject the dice control handler
-                        handleCanvasControl: desktopRemoteHandlers.handleCanvasControl, // Inject the canvas control handler
-                        handleFlowlockControl: desktopRemoteHandlers.handleFlowlockControl, // Inject the flowlock control handler
-                        handleDesktopRemoteControl: desktopRemoteHandlers.handleDesktopRemoteControl, // Inject the desktop remote control handler
-                        chatDataService, // Share the Electron-owned VCP-CDS facade with direct plugins.
-                        loomManager // Share the Electron-owned VCP Loom manager with direct plugins.
-                    };
-                    distributedServer = new DistributedServer(config);
-                    await distributedServer.initialize();
-                } else {
-                    console.log('[Main] Distributed server is disabled in settings.');
-                }
-            } catch (error) {
-                distributedServer = null;
-                console.error('[Main] Failed to read settings or initialize distributed server:', error);
-            }
-        })();
-        // --- End of Distributed Server Initialization ---
+        // 分布式服务由渲染器正式就绪点触发；不要在首屏关键路径中启动
+        // VCPMobileSync 索引、插件发现和网络监听。
 
         app.on('activate', () => {
             // On macOS, re-show the main window when the dock icon is clicked.
@@ -1142,10 +1629,7 @@ if (!gotTheLock) {
         });
 
         globalShortcut.register('Control+Shift+I', () => {
-            const focusedWindow = BrowserWindow.getFocusedWindow();
-            if (focusedWindow && focusedWindow.webContents && !focusedWindow.webContents.isDestroyed()) {
-                focusedWindow.webContents.toggleDevTools();
-            }
+            toggleDevToolsForWindow(BrowserWindow.getFocusedWindow());
         });
 
         const noteMiniShortcutRegistered = globalShortcut.register('Super+Alt+Z', () => {
@@ -1171,7 +1655,20 @@ if (!gotTheLock) {
             return process.platform;
         });
 
-        loadMainWindow();
+        // 主窗口页面完成加载、触发展示后再后台预热 Scriptorium。
+        // 不 await：重型 CommonJS 解析不会延迟主窗口首屏；若用户更早打开
+        // 文坊，临时 IPC 桥接会立即启动并等待同一个单例加载 Promise。
+        reportLauncherProgress('renderer-loading', 0.9, '正在绘制聊天界面');
+        void loadMainWindow()
+            .then(() => loadDocxHandlers())
+            .catch((error) => {
+                // 模块加载错误已由 loadDocxHandlers 记录；这里只记录页面加载错误。
+                if (!docxHandlersLoadPromise) {
+                    console.error('[Main] Main window load failed before docx prewarm:', error);
+                }
+            });
+
+        // --- 自动打开桌面窗口 ---
 
         // --- 自动打开桌面窗口 ---
         // 当使用 --desktop-only 参数启动时，在所有 IPC 初始化完成后自动打开桌面窗口
@@ -1253,7 +1750,7 @@ if (!gotTheLock) {
 
     app.on('will-quit', () => {
         // 0. Clean up the ready signal file for the native splash screen
-        const readyFile = path.join(__dirname, '.vcp_ready');
+        const readyFile = NATIVE_SPLASH_READY_FILE;
         if (fs.existsSync(readyFile)) {
             fs.unlinkSync(readyFile);
         }

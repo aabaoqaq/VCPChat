@@ -1,4 +1,16 @@
 // Voicechatmodules/voicechat.js
+import { createMemoryChatRepository } from '../modules/chat/memoryChatRepository.js';
+import { createTransientChatHistoryPersistence } from '../modules/chat/chatHistoryPersistence.js';
+import { createChatHistoryMutationAuthority } from '../modules/chat/chatHistoryMutationAuthority.js';
+import { createChatRepository } from '../modules/chat/chatRepository.js';
+import { createWindowStreamRuntime } from '../modules/renderer/windowStreamRuntime.js';
+import { createMessageRenderer } from '../modules/messageRenderer.js';
+import { createStreamProjection } from '../modules/renderer/streamManager.js';
+import { createStreamTransientHistory } from '../modules/chat/streamTransientHistory.js';
+import { createTtsSurfaceOwner } from '../modules/renderer/ttsSurfaceOwner.js';
+
+const streamManager = createStreamProjection();
+const messageRenderer = createMessageRenderer({ streamManager });
 
 document.addEventListener('DOMContentLoaded', () => {
     const chatMessagesDiv = document.getElementById('chatMessages');
@@ -10,34 +22,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const toggleInputModeBtn = document.getElementById('toggleInputModeBtn');
     const keyboardIcon = document.getElementById('keyboard-icon');
     const micIcon = document.getElementById('mic-icon');
+    let historyMutationAuthority = null;
+    let ttsSurfaceOwner = null;
 
-    // Initialize audio context on first user gesture
-    function initAudioContext() {
-        if (!audioContext) {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            console.log('[VoiceChat] Audio context initialized');
-        }
-        if (audioContext.state === 'suspended') {
-            audioContext.resume();
-        }
-    }
-
-    // Detect user gestures to enable audio playback
+    // Detect user gestures to unlock the shared Web Audio playback surface.
     function detectUserGesture() {
-        if (!userGestureDetected) {
-            userGestureDetected = true;
-            initAudioContext();
-            console.log('[VoiceChat] User gesture detected, audio playback enabled');
-
-            // Remove any existing hints or errors
-            document.querySelectorAll('.audio-playback-hint, .audio-playback-error').forEach(el => el.remove());
-
-            // Try to restart audio queue if there are pending items
-            if (audioQueue.length > 0 && !isPlaying) {
-                console.log('[VoiceChat] Restarting audio queue after user gesture');
-                setTimeout(() => processAudioQueue(), 100);
-            }
-        }
+        ttsSurfaceOwner?.ensureAudioContext();
+        document.querySelectorAll('.audio-playback-hint, .audio-playback-error').forEach(el => el.remove());
     }
 
     // Add gesture listeners to enable audio
@@ -52,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let globalSettings = {};
     let currentChatHistory = [];
     let activeStreamingMessageId = null;
+    let streamRuntime = null;
     let inputMode = 'text'; // 'text' or 'voice'
     const markedInstance = new window.marked.Marked({ gfm: true, breaks: true });
     let speechRecognitionTimeout = null;
@@ -74,8 +66,19 @@ document.addEventListener('DOMContentLoaded', () => {
     closeBtn.addEventListener('click', async () => {
         closeBtn.disabled = true;
         try {
+            if (activeStreamingMessageId) {
+                await window.electronAPI.interruptVcpRequest?.({ messageId: activeStreamingMessageId });
+                await streamRuntime?.cancel(activeStreamingMessageId, 'voice-window-close');
+            }
             await saveVoiceChatToHistory();
         } finally {
+            await ttsSurfaceOwner?.dispose();
+            ttsSurfaceOwner = null;
+            await streamRuntime?.dispose();
+            await streamManager.dispose();
+            await messageRenderer.disposeRootResources(chatMessagesDiv);
+            messageRenderer.disposeRendererResources();
+            await historyMutationAuthority?.dispose();
             window.close();
         }
     });
@@ -96,42 +99,15 @@ document.addEventListener('DOMContentLoaded', () => {
         return !!expectedTopicId && eventTopicId === expectedTopicId && eventAgentId === agentId;
     }
 
-    async function waitForActiveStreamToSettle(timeoutMs = 4000) {
-        if (!activeStreamingMessageId) return true;
-
-        const pendingMessageId = activeStreamingMessageId;
-        console.log(`[VoiceChat] Waiting for active stream to settle before close: ${pendingMessageId}`);
-
-        return await new Promise((resolve) => {
-            let settled = false;
-            const startedAt = Date.now();
-
-            const check = () => {
-                if (settled) return;
-                if (activeStreamingMessageId !== pendingMessageId) {
-                    settled = true;
-                    resolve(true);
-                    return;
-                }
-
-                if (Date.now() - startedAt >= timeoutMs) {
-                    console.warn(`[VoiceChat] Timed out while waiting stream to settle: ${pendingMessageId}`);
-                    settled = true;
-                    resolve(false);
-                    return;
-                }
-
-                setTimeout(check, 80);
-            };
-
-            check();
-        });
+    function restoreComposerAfterStream() {
+        activeStreamingMessageId = null;
+        messageInput.disabled = false;
+        sendMessageBtn.disabled = false;
+        messageInput.focus();
     }
 
     async function saveVoiceChatToHistory() {
         if (!agentId) return;
-
-        await waitForActiveStreamToSettle();
 
         const persistedHistory = currentChatHistory.filter(msg => !msg.isThinking && msg.role !== 'system');
         if (persistedHistory.length === 0) return;
@@ -145,7 +121,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result && result.success && result.topicId) {
                 const newTopicId = result.topicId;
 
-                await window.electronAPI.saveChatHistory(agentId, newTopicId, persistedHistory);
+                if (!historyMutationAuthority) throw new Error('Voice history mutation authority is not ready');
+                await historyMutationAuthority.replace({ itemId: agentId, itemType: 'agent', topicId: newTopicId, category: 'voice-session-close' }, persistedHistory);
                 console.log(`[VoiceChat] History saved to new topic: ${newTopicId}`);
 
                 if (window.summarizeTopicFromMessages) {
@@ -225,11 +202,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function getVoiceRuntimeSettings(settings = {}) {
         return {
-            voiceMode: settings.voiceMode || 'local',
+            voiceMode: settings.voiceMode === 'network' ? 'network' : 'local',
             speechRecognizerBrowserPath: settings.speechRecognizerBrowserPath || '',
             speechRecognizerPagePath: settings.speechRecognizerPagePath || 'Voicechatmodules/recognizer.html',
-            voiceNetworkSettings: settings.voiceNetworkSettings || { sovitsUrl: '', sovitsKey: '' },
-            voiceLocalSettings: settings.voiceLocalSettings || { providerUrl: '', providerKey: '' }
+            voiceNetworkSettings: settings.voiceNetworkSettings || { providerUrl: '', providerKey: '' },
+            voiceLocalSettings: settings.voiceLocalSettings || { sovitsUrl: '', sovitsKey: '' }
         };
     }
 
@@ -266,7 +243,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function initializeRenderer() {
-        if (window.messageRenderer) {
+        if (messageRenderer) {
             const chatHistoryRef = {
                 get: () => currentChatHistory,
                 set: (newHistory) => { currentChatHistory = newHistory; }
@@ -289,21 +266,82 @@ document.addEventListener('DOMContentLoaded', () => {
                 get: () => getVoiceTopicId(),
                 set: () => {}
             };
-            window.messageRenderer.initializeMessageRenderer({
+            const chatRepository = createMemoryChatRepository({
+                read: () => currentChatHistory,
+                write: history => { currentChatHistory = history; },
+            });
+            const historyPersistence = createTransientChatHistoryPersistence(chatRepository);
+            const transientStreamHistory = createStreamTransientHistory({
+                repository: chatRepository,
+                currentHistory: { get: () => chatHistoryRef.get(), replace: history => chatHistoryRef.set(history) },
+            });
+            historyMutationAuthority = createChatHistoryMutationAuthority({ repository: createChatRepository(window.electronAPI) });
+            messageRenderer.initializeMessageRenderer({
+                chatRepository,
+                historyMutationAuthority,
                 currentChatHistoryRef: chatHistoryRef,
                 currentSelectedItemRef: selectedItemRef,
                 currentTopicIdRef: topicIdRef,
+                transientStreamHistory,
+                viewAuthority: { isCurrent: context => context?.agentId === agentId && context?.topicId === getVoiceTopicId() },
                 globalSettingsRef: globalSettingsRef,
                 chatMessagesDiv: chatMessagesDiv,
                 electronAPI: window.electronAPI,
                 markedInstance: markedInstance,
+                morphdom: window.morphdom,
+                pretextBridge: window.pretextBridge,
+                flowlockProtocol: window.flowlockProtocol,
                 uiHelper: uiHelperFunctions, // Pass the local helper
+                messageCommands: { handleSendMessage: text => sendMessage(text) },
                 summarizeTopicFromMessages: window.summarizeTopicFromMessages || (async () => ""),
                 handleCreateBranch: () => {} // Stub
             });
+            ttsSurfaceOwner = createTtsSurfaceOwner({
+                subscribePlay: callback => window.electronAPI.onPlayTtsAudio(callback),
+                subscribeStop: callback => window.electronAPI.onStopTtsAudio(callback),
+                createAudioContext: () => new (window.AudioContext || window.webkitAudioContext)(),
+                decodeBase64: value => Uint8Array.from(
+                    atob(value),
+                    character => character.charCodeAt(0)
+                ).buffer,
+                updateSpeakingIndicator: (messageId, active) => {
+                    const messageItem = chatMessagesDiv.querySelector(
+                        `.message-item[data-message-id="${messageId}"]`
+                    );
+                    if (!messageItem) return;
+                    const avatar = messageItem.querySelector('.chat-avatar');
+                    messageItem.classList.toggle('speaking-active', active);
+                    avatar?.classList.toggle('speaking', active);
+                    if (avatar) {
+                        avatar.title = active ? '正在朗读，点击头像停止' : '';
+                        avatar.setAttribute('aria-label', active ? '停止朗读' : 'Agent 头像');
+                    }
+                },
+                showError: message => console.error(`[VoiceChat] ${message}`),
+            });
+            ttsSurfaceOwner.mount();
+
+            streamRuntime = createWindowStreamRuntime({
+                root: chatMessagesDiv,
+                streamProjection: streamManager,
+                historyPersistence,
+                getSelection: () => ({ id: agentId, type: 'agent' }),
+                getTopicId: getVoiceTopicId,
+                getMessageContext: () => ({
+                    agentId, topicId: getVoiceTopicId(), agentName: agentConfig?.name,
+                    avatarUrl: agentConfig?.avatarUrl, avatarColor: agentConfig?.avatarCalculatedColor,
+                }),
+                contextFilter: context => !!context && context.topicId === getVoiceTopicId() && context.agentId === agentId,
+                dispatchTerminal: detail => window.dispatchEvent(new CustomEvent('vcp-chat-stream-terminal', { detail })),
+                afterPersist: ({ terminal, finalized }) => {
+                    if (terminal.kind !== 'completed') return;
+                    if (finalized?.messageId) setTimeout(() => extractTextAndPlayTTS(finalized.messageId, 0), 100);
+                },
+                onSettled: restoreComposerAfterStream,
+            });
             console.log('[VoiceChat] Shared messageRenderer initialized.');
         } else {
-            console.error('[VoiceChat] window.messageRenderer is not available.');
+            console.error('[VoiceChat] shared message renderer provider is not available.');
         }
     }
 
@@ -327,10 +365,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const sendMessage = async (messageContent) => {
         clearTimeout(speechRecognitionTimeout); // Stop any pending auto-send
-        if (!messageContent.trim() || !agentConfig || !window.messageRenderer) return;
+        if (!messageContent.trim() || !agentConfig || !messageRenderer) return;
 
         const userMessage = { role: 'user', content: messageContent, timestamp: Date.now(), id: `user_msg_${Date.now()}` };
-        await window.messageRenderer.renderMessage(userMessage);
+        await messageRenderer.renderMessage(userMessage);
         currentChatHistory.push(userMessage);
 
         messageInput.value = '';
@@ -349,7 +387,7 @@ document.addEventListener('DOMContentLoaded', () => {
             name: agentConfig.name,
             avatarUrl: agentConfig.avatarUrl
         };
-        await window.messageRenderer.renderMessage(assistantMessagePlaceholder);
+        await messageRenderer.renderMessage(assistantMessagePlaceholder);
 
         const context = {
             agentId: agentId,
@@ -387,70 +425,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } catch (error) {
             console.error('Error sending message to VCP:', error);
-            if (window.messageRenderer) {
-                window.messageRenderer.finalizeStreamedMessage(thinkingMessageId, 'error');
-                const messageItemContent = document.querySelector(`.message-item[data-message-id="${thinkingMessageId}"] .md-content`);
-                if (messageItemContent) {
-                    messageItemContent.innerHTML = `<p style="color: var(--danger-color);">请求失败: ${error.message}</p>`;
-                }
-            }
-            activeStreamingMessageId = null;
-            messageInput.disabled = false;
-            sendMessageBtn.disabled = false;
-            messageInput.focus();
+            const accepted = streamRuntime?.accept({
+                    type: 'error', messageId: thinkingMessageId, error: error.message,
+                    context: { agentId, topicId: getVoiceTopicId() },
+                });
+            if (!accepted) restoreComposerAfterStream();
         }
     };
 
-    const activeStreams = new Set();
     window.electronAPI.onVCPStreamEvent((eventData) => {
-        if (!window.messageRenderer || !isEventForCurrentVoiceSession(eventData)) return;
-
-        const { messageId, type, chunk, error, context } = eventData;
-
-        if (!activeStreams.has(messageId) && type === 'data') {
-            window.messageRenderer.startStreamingMessage({
-                id: messageId,
-                role: 'assistant',
-                name: agentConfig.name,
-                avatarUrl: agentConfig.avatarUrl,
-                context: context,
-            });
-            activeStreams.add(messageId);
-        }
-
-        if (type === 'data') {
-            window.messageRenderer.appendStreamChunk(messageId, chunk, context);
-        } else if (type === 'end') {
-            console.log(`[VoiceChat] 收到流结束事件，messageId: ${messageId}`);
-            console.log(`[VoiceChat] 当前activeStreamingMessageId: ${activeStreamingMessageId}`);
-            console.log(`[VoiceChat] agentConfig状态: ${!!agentConfig}, TTS语音: ${agentConfig?.ttsVoicePrimary || '未设置'}`);
-
-            window.messageRenderer.finalizeStreamedMessage(messageId, 'completed', context).then(() => {
-                console.log(`[VoiceChat] finalizeStreamedMessage完成，准备TTS`);
-
-                // 添加延迟以确保DOM完全渲染
-                setTimeout(() => {
-                    extractTextAndPlayTTS(messageId, 0);
-                }, 100);
-            });
-
-            activeStreams.delete(messageId);
-            activeStreamingMessageId = null;
-            messageInput.disabled = false;
-            sendMessageBtn.disabled = false;
-            messageInput.focus();
-        } else if (type === 'error') {
-            window.messageRenderer.finalizeStreamedMessage(messageId, 'error', context);
-            const messageItemContent = document.querySelector(`.message-item[data-message-id="${messageId}"] .md-content`);
-            if (messageItemContent) {
-                messageItemContent.innerHTML = `<p style="color: var(--danger-color);">${error || '未知流错误'}</p>`;
-            }
-            activeStreams.delete(messageId);
-            activeStreamingMessageId = null;
-            messageInput.disabled = false;
-            sendMessageBtn.disabled = false;
-            messageInput.focus();
-        }
+        if (!streamRuntime || !isEventForCurrentVoiceSession(eventData)) return;
+        streamRuntime.accept(eventData);
     });
     
     // 新增：智能文本提取和TTS触发函数，包含重试机制
@@ -463,8 +448,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (messageElement) {
             const contentElement = messageElement.querySelector('.md-content');
-            if (contentElement && window.messageRenderer?.extractSpeakableTextFromContentElement) {
-                textToSpeak = window.messageRenderer.extractSpeakableTextFromContentElement(contentElement);
+            if (contentElement && messageRenderer?.extractSpeakableTextFromContentElement) {
+                textToSpeak = messageRenderer.extractSpeakableTextFromContentElement(contentElement);
             } else if (contentElement) {
                 const contentClone = contentElement.cloneNode(true);
                 contentClone.querySelectorAll('.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script').forEach(el => el.remove());
@@ -501,8 +486,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         console.log(`[VoiceChat] 找到备用匹配元素: ${idAttr}`);
                         const contentElement = item.querySelector('.md-content');
                         if (contentElement) {
-                            const backupText = window.messageRenderer?.extractSpeakableTextFromContentElement
-                                ? window.messageRenderer.extractSpeakableTextFromContentElement(contentElement)
+                            const backupText = messageRenderer?.extractSpeakableTextFromContentElement
+                                ? messageRenderer.extractSpeakableTextFromContentElement(contentElement)
                                 : (contentElement.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
                             if (backupText.trim().length > 0) {
                                 console.log(`[VoiceChat] 使用备用元素提取到文本长度: ${backupText.trim().length}`);
@@ -526,8 +511,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         console.log(`[VoiceChat] Requesting TTS for message ${msgId}`, {
             voiceMode: globalSettings.voiceMode || 'local',
-            networkSovitsUrl: globalSettings.voiceNetworkSettings?.sovitsUrl || '',
-            localProviderUrl: globalSettings.voiceLocalSettings?.providerUrl || ''
+            networkProviderUrl: globalSettings.voiceNetworkSettings?.providerUrl || '',
+            localSovitsUrl: globalSettings.voiceLocalSettings?.sovitsUrl || ''
         });
         window.electronAPI.sovitsSpeak({
             text: text,
@@ -535,122 +520,11 @@ document.addEventListener('DOMContentLoaded', () => {
             speed: agentConfig.ttsSpeed,
             msgId: msgId,
             ttsRegex: agentConfig.ttsRegexPrimary,
+            directorPrompts: agentConfig.ttsDirectorPrompts,
             voiceSecondary: agentConfig.ttsVoiceSecondary,
             ttsRegexSecondary: agentConfig.ttsRegexSecondary
         });
     }
-
-    // --- TTS Audio Playback Logic ---
-    let currentAudio = null;
-    let audioQueue = []; // Queue for pending audio clips
-    let isPlaying = false;
-    let audioContext = null;
-    let userGestureDetected = false;
-
-    function processAudioQueue() {
-        if (isPlaying || audioQueue.length === 0) {
-            return; // Don't start a new audio if one is already playing or queue is empty
-        }
-
-        isPlaying = true;
-        const { audioData, msgId } = audioQueue.shift(); // Get the next audio from the queue
-
-        console.log(`[VoiceChat] Processing audio from queue for msgId ${msgId}`);
-
-        const byteCharacters = atob(audioData);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-            byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        const audioBlob = new Blob([byteArray], { type: 'audio/mpeg' });
-        const audioUrl = URL.createObjectURL(audioBlob);
-
-        currentAudio = new Audio(audioUrl);
-
-        // Check if user gesture has been detected
-        if (!userGestureDetected) {
-            console.warn('[VoiceChat] No user gesture detected, audio may be blocked');
-            // Show user a hint
-            const messageElement = document.querySelector(`[data-message-id="${msgId}"]`);
-            if (messageElement) {
-                const hint = document.createElement('div');
-                hint.className = 'audio-playback-hint';
-                hint.textContent = '点击任意位置以启用语音播放';
-                hint.style.cssText = 'color: var(--warning-color); font-size: 0.8em; margin-top: 5px; cursor: pointer;';
-                hint.addEventListener('click', detectUserGesture);
-                messageElement.appendChild(hint);
-
-                // Remove hint after 5 seconds
-                setTimeout(() => {
-                    if (hint.parentNode) {
-                        hint.remove();
-                    }
-                }, 5000);
-            }
-        }
-
-        currentAudio.play().then(() => {
-            console.log(`[VoiceChat] Audio playback started for msgId ${msgId}`);
-        }).catch(e => {
-            console.error("Audio playback failed:", e);
-
-            // Show error message to user
-            const messageElement = document.querySelector(`[data-message-id="${msgId}"]`);
-            if (messageElement) {
-                const errorMsg = document.createElement('div');
-                errorMsg.className = 'audio-playback-error';
-                errorMsg.textContent = '语音播放失败，请点击页面任意位置后重试';
-                errorMsg.style.cssText = 'color: var(--danger-color); font-size: 0.8em; margin-top: 5px; cursor: pointer;';
-                errorMsg.addEventListener('click', () => {
-                    detectUserGesture();
-                    errorMsg.remove();
-                    // Retry playing this audio
-                    audioQueue.unshift({ audioData, msgId });
-                    processAudioQueue();
-                });
-                messageElement.appendChild(errorMsg);
-
-                // Remove error after 10 seconds
-                setTimeout(() => {
-                    if (errorMsg.parentNode) {
-                        errorMsg.remove();
-                    }
-                }, 10000);
-            }
-
-            isPlaying = false; // Reset flag on error
-            processAudioQueue(); // Try to play the next one
-        });
-
-        currentAudio.onended = () => {
-            console.log(`[VoiceChat] Audio for msgId ${msgId} finished playing.`);
-            URL.revokeObjectURL(audioUrl);
-            currentAudio = null;
-            isPlaying = false;
-            processAudioQueue(); // Play the next item in the queue
-        };
-    }
-
-    window.electronAPI.onPlayTtsAudio((data) => {
-        const { audioData, msgId } = data;
-        console.log(`[VoiceChat] Queued audio for msgId ${msgId}`);
-        audioQueue.push({ audioData, msgId });
-        processAudioQueue(); // Attempt to process the queue
-    });
-
-    // Listen for stop command from main process
-    window.electronAPI.onStopTtsAudio(() => {
-        console.log('[VoiceChat] Received stop TTS command. Clearing queue and stopping current audio.');
-        audioQueue = []; // Clear the pending audio queue
-        if (currentAudio) {
-            currentAudio.pause();
-            URL.revokeObjectURL(currentAudio.src);
-            currentAudio = null;
-        }
-        isPlaying = false;
-    });
-
 
     // Listen for theme updates from the main process
     window.electronAPI.onThemeUpdated((theme) => {

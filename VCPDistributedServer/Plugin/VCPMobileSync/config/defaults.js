@@ -26,9 +26,55 @@ const GROUP_DEFAULTS = {
   useUnifiedModel: false,
   unifiedModel: "",
   tagMatchMode: "strict",
+  createdAt: 0,
   avatar: null,
   avatarCalculatedColor: null,
 };
+
+function isUnicodeScalarString(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeMemberTags(value) {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("memberTags must be an object of string values");
+  }
+
+  const entries = Object.entries(value).map(([agentId, tags]) => {
+    if (!agentId || !isUnicodeScalarString(agentId)) {
+      throw new TypeError("memberTags keys must be non-empty Unicode strings");
+    }
+    if (typeof tags !== "string") {
+      throw new TypeError(`memberTags[${JSON.stringify(agentId)}] must be a string`);
+    }
+    return [agentId, tags];
+  });
+  return Object.fromEntries(entries);
+}
+
+function resolveCentralIndexPreference(pluginConfig = {}, chatDataService = null) {
+  const hasPluginSetting =
+    Object.prototype.hasOwnProperty.call(
+      pluginConfig,
+      "MobileSyncUseCentralIndex",
+    ) && typeof pluginConfig.MobileSyncUseCentralIndex === "boolean";
+  if (hasPluginSetting) return pluginConfig.MobileSyncUseCentralIndex;
+  if (typeof chatDataService?.mobileSyncUseCentralIndex === "boolean") {
+    return chatDataService.mobileSyncUseCentralIndex;
+  }
+  return true;
+}
 
 // Agent Topic 默认值 (仅当手机端缺失 locked/unread 时使用)
 // 实际场景：手机端 TopicSyncDTO 已包含这些字段，会覆盖默认值
@@ -48,11 +94,11 @@ const AGENT_TOPIC_DEFAULTS = {
  * @returns {object} 完整配置
  */
 function createAgentConfig(id, dto) {
-  const name = dto.name || AGENT_DEFAULTS.name;
+  const name = dto.name ?? AGENT_DEFAULTS.name;
   return {
     // 注意：Agent 配置不写入 id 字段，id 由目录名推导
     name,
-    systemPrompt: dto.systemPrompt || `你是 ${name}。`,
+    systemPrompt: dto.systemPrompt ?? `你是 ${name}。`,
     model: dto.model ?? AGENT_DEFAULTS.model,
     temperature: dto.temperature ?? AGENT_DEFAULTS.temperature,
     contextTokenLimit: dto.contextTokenLimit ?? AGENT_DEFAULTS.contextTokenLimit,
@@ -73,18 +119,18 @@ function createAgentConfig(id, dto) {
 function createGroupConfig(id, dto) {
   return {
     id,
-    name: dto.name || GROUP_DEFAULTS.name,
+    name: dto.name ?? GROUP_DEFAULTS.name,
     avatar: GROUP_DEFAULTS.avatar,
     avatarCalculatedColor: GROUP_DEFAULTS.avatarCalculatedColor,
     members: dto.members ?? GROUP_DEFAULTS.members,
     mode: dto.mode ?? GROUP_DEFAULTS.mode,
     tagMatchMode: dto.tagMatchMode ?? GROUP_DEFAULTS.tagMatchMode,
-    memberTags: dto.memberTags ?? GROUP_DEFAULTS.memberTags,
+    memberTags: normalizeMemberTags(dto.memberTags ?? GROUP_DEFAULTS.memberTags),
     groupPrompt: dto.groupPrompt ?? GROUP_DEFAULTS.groupPrompt,
     invitePrompt: dto.invitePrompt ?? GROUP_DEFAULTS.invitePrompt,
     useUnifiedModel: dto.useUnifiedModel ?? GROUP_DEFAULTS.useUnifiedModel,
     unifiedModel: dto.unifiedModel ?? GROUP_DEFAULTS.unifiedModel,
-    createdAt: dto.createdAt || Date.now(),
+    createdAt: dto.createdAt ?? GROUP_DEFAULTS.createdAt,
     topics: [],
   };
 }
@@ -125,25 +171,22 @@ function createGroupTopic(dto) {
  * @param {string} ext - 扩展名
  * @returns {object} 桌面端标准附件结构
  */
-function createDesktopAttachment(dto, desktopPath, ext) {
+function createDesktopAttachment(dto, desktopPath, ext, fallbackCreatedAt = 0) {
   const hash = dto.hash || "";
   const name = dto.name || "unnamed";
   const type = dto.type || "application/octet-stream";
   const size = dto.size || 0;
-  const createdAt = dto.createdAt || Date.now();
+  const createdAt = dto.createdAt ?? fallbackCreatedAt;
   
-  // 推导合理的内部名和展示路径 (修正：统一使用 file:// 前缀)
+  // 只使用调用方基于实际 AppData 解析出的路径；不得在协议层猜测安装目录。
   const internalFileName = hash ? `${hash}${ext}` : "";
-  const desktopSrc = desktopPath 
-    ? `file://${desktopPath}` 
-    : (hash ? `file://G:\\VCPChat\\AppData\\UserData\\attachments\\${internalFileName}` : "");
+  const desktopSrc = desktopPath ? `file://${desktopPath}` : "";
 
-  return {
+  const attachment = {
     type,
     src: desktopSrc,
     name,
     size,
-    status: dto.status || "ready",
     _fileManagerData: {
       id: `attachment_${hash}`,
       name,
@@ -157,15 +200,19 @@ function createDesktopAttachment(dto, desktopPath, ext) {
       imageFrames: dto.imageFrames || null,
     }
   };
+  if (desktopPath) attachment.status = "ready";
+  return attachment;
 }
 
 module.exports = {
   AGENT_DEFAULTS,
   GROUP_DEFAULTS,
   AGENT_TOPIC_DEFAULTS,
+  normalizeMemberTags,
   createAgentConfig,
   createGroupConfig,
   createAgentTopic,
   createGroupTopic,
   createDesktopAttachment,
+  resolveCentralIndexPreference,
 };

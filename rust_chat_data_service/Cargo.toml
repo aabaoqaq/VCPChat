@@ -10,7 +10,6 @@ ammonia = "4"
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
-blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 fs2 = "0.4"
 futures = "0.3"
@@ -34,6 +33,9 @@ tower-http = { version = "0.6", features = ["limit", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"

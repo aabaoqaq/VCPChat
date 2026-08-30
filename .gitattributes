@@ -25,3 +25,6 @@ package-lock.json merge=ours
 *.jpeg binary
 *.gif binary
 *.exe binary
+
+# --- 上游 WebAwesome runtime ---
+vendor/webawesome-runtime/** -text -whitespace
