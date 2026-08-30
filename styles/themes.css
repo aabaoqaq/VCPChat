@@ -178,3 +178,9 @@ body.light-theme .message-bubble {
         0 4px 20px rgba(45, 41, 34, 0.08),
         inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
+
+/* Keep keyboard focus visible without overriding the main composer. */
+:focus-visible:not(#messageInput):not(.chat-message-input) {
+    outline: 2px solid var(--highlight-text);
+    outline-offset: 2px;
+}
