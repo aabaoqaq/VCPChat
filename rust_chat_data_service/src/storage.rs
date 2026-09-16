@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     config::SCHEMA_VERSION,
@@ -41,6 +42,8 @@ CREATE TABLE IF NOT EXISTS avatars (
     owner_id TEXT NOT NULL,
     file_path TEXT NOT NULL,
     hash TEXT NOT NULL,
+    mtime_ms REAL NOT NULL DEFAULT 0,
+    file_size INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL,
     deleted_at INTEGER,
     PRIMARY KEY (owner_type, owner_id)
@@ -206,12 +209,29 @@ pub struct SourceMetadata {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AvatarSourceState {
+    pub file_path: PathBuf,
+    pub hash: String,
+    pub mtime_ms: f64,
+    pub file_size: i64,
+    pub deleted_at: Option<i64>,
+}
+
 impl SourceMetadata {
     pub fn matches_topic(&self, key: &TopicKey) -> bool {
         self.owner_type == key.owner_type.as_str()
             && self.owner_id == key.owner_id
             && self.topic_id == key.topic_id
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct SyncHistorySnapshot {
+    pub(crate) source_path: PathBuf,
+    pub(crate) source_hash: String,
+    pub(crate) messages: Vec<Value>,
+    pub(crate) tombstone_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +267,12 @@ pub enum OwnerHashMode {
     Deferred,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SyncTopicVersion {
+    pub(crate) config_hash: String,
+    pub(crate) updated_at: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseStats {
     pub owners: i64,
@@ -257,10 +283,29 @@ pub struct DatabaseStats {
     pub last_reconcile_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DatabaseStartupState {
+    pub database_existed: bool,
+    pub previous_clean_shutdown: bool,
+    pub filesystem_dirty: bool,
+    pub schema_migrated: bool,
+    pub integrity_checked: bool,
+}
+
+impl DatabaseStartupState {
+    pub fn requires_startup_reconcile(self) -> bool {
+        !self.database_existed
+            || !self.previous_clean_shutdown
+            || self.filesystem_dirty
+            || self.schema_migrated
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     pub(crate) connection: Arc<Mutex<Connection>>,
     path: PathBuf,
+    startup_state: DatabaseStartupState,
 }
 
 impl Database {
@@ -271,8 +316,9 @@ impl Database {
             })?;
         }
 
-        let connection = match Self::open_and_migrate(path) {
-            Ok(connection) => connection,
+        let database_existed = path.exists();
+        let (connection, mut startup_state) = match Self::open_and_migrate(path, database_existed) {
+            Ok(result) => result,
             Err(error) => {
                 if path.exists() {
                     let isolated = path.with_extension(format!("corrupt.{}.sqlite3", now_ms()));
@@ -287,20 +333,25 @@ impl Database {
                         isolated_path = %isolated.display(),
                         "isolated unusable chat database"
                     );
-                    Self::open_and_migrate(path)?
+                    Self::open_and_migrate(path, false)?
                 } else {
                     return Err(error);
                 }
             }
         };
+        startup_state.database_existed = database_existed && !startup_state.schema_migrated;
 
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             path: path.to_path_buf(),
+            startup_state,
         })
     }
 
-    fn open_and_migrate(path: &Path) -> Result<Connection> {
+    fn open_and_migrate(
+        path: &Path,
+        database_existed: bool,
+    ) -> Result<(Connection, DatabaseStartupState)> {
         let mut connection = Connection::open(path)
             .with_context(|| format!("failed to open database {}", path.display()))?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -311,48 +362,171 @@ impl Database {
              PRAGMA temp_store=MEMORY;",
         )?;
 
-        let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            anyhow::bail!("SQLite quick_check failed: {integrity}");
-        }
-
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch(SCHEMA_V3)?;
-        let has_v1_tombstones = transaction.query_row(
+        let has_service_meta = connection.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM sqlite_master
-                WHERE type='table' AND name='tombstones'
+                WHERE type='table' AND name='service_meta'
              )",
             [],
             |row| row.get::<_, bool>(0),
         )?;
-        if has_v1_tombstones {
-            transaction.execute_batch(COLLAPSE_V1_TOMBSTONES)?;
+        let stored_schema = if has_service_meta {
+            connection
+                .query_row(
+                    "SELECT value FROM service_meta WHERE key='schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|value| value.parse::<u32>().ok())
+        } else {
+            None
+        };
+        anyhow::ensure!(
+            stored_schema.is_none_or(|version| version <= SCHEMA_VERSION),
+            "database schema {} is newer than runtime schema {SCHEMA_VERSION}",
+            stored_schema.unwrap_or_default()
+        );
+
+        // `mtime_ms` and `file_size` were added as rebuildable avatar source
+        // metadata without changing the public CDS schema version. Detect the
+        // physical columns so databases already opened by the upstream schema
+        // 3 runtime still receive the additive migration exactly once.
+        let avatar_source_metadata_missing = !table_has_column(&connection, "avatars", "mtime_ms")?
+            || !table_has_column(&connection, "avatars", "file_size")?;
+        let schema_migrated =
+            stored_schema != Some(SCHEMA_VERSION) || avatar_source_metadata_missing;
+        let previous_clean_shutdown =
+            has_service_meta && meta_optional_i64(&connection, "clean_shutdown")? == Some(1);
+        let filesystem_dirty =
+            !has_service_meta || meta_optional_i64(&connection, "filesystem_dirty")? != Some(0);
+        let integrity_checked = !previous_clean_shutdown || schema_migrated;
+        if integrity_checked {
+            let integrity: String =
+                connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                anyhow::bail!("SQLite quick_check failed: {integrity}");
+            }
         }
-        migrate_sync_hash_contract(&transaction)?;
-        transaction.execute(
-            "INSERT INTO service_meta(key, value) VALUES('schema_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [SCHEMA_VERSION.to_string()],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO service_meta(key, value) VALUES
-             ('global_content_revision', '0'),
-             ('tantivy_index_revision', '0')",
+        if schema_migrated {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(SCHEMA_V3)?;
+            let has_v1_tombstones = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type='table' AND name='tombstones'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if has_v1_tombstones {
+                transaction.execute_batch(COLLAPSE_V1_TOMBSTONES)?;
+            }
+            migrate_sync_hash_contract(&transaction)?;
+            ensure_avatar_source_metadata(&transaction)?;
+            transaction.execute(
+                "INSERT INTO service_meta(key, value) VALUES('schema_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [SCHEMA_VERSION.to_string()],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO service_meta(key, value) VALUES
+                 ('global_content_revision', '0'),
+                 ('tantivy_index_revision', '0'),
+                 ('clean_shutdown', '0'),
+                 ('filesystem_dirty', '1')",
+                [],
+            )?;
+            // Existing schema 3 databases receive zeroed source metadata.
+            // Persist recovery intent atomically so an interrupted first
+            // reconcile is retried instead of taking the clean fast path.
+            transaction.execute(
+                "INSERT INTO service_meta(key, value) VALUES('filesystem_dirty', '1')
+                 ON CONFLICT(key) DO UPDATE SET value='1'",
+                [],
+            )?;
+            transaction.commit()?;
+        }
+
+        // Mark the currently running generation as unclean before publishing
+        // readiness. Graceful shutdown is the only path that changes it to 1.
+        connection.execute(
+            "INSERT INTO service_meta(key, value) VALUES('clean_shutdown', '0')
+             ON CONFLICT(key) DO UPDATE SET value='0'",
             [],
         )?;
-        transaction.commit()?;
-        Ok(connection)
+        connection.execute(
+            "INSERT OR IGNORE INTO service_meta(key, value)
+             VALUES('filesystem_dirty', '1')",
+            [],
+        )?;
+
+        Ok((
+            connection,
+            DatabaseStartupState {
+                database_existed,
+                previous_clean_shutdown,
+                filesystem_dirty,
+                schema_migrated,
+                integrity_checked,
+            },
+        ))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    pub fn startup_state(&self) -> DatabaseStartupState {
+        self.startup_state
+    }
+
+    pub fn mark_filesystem_dirty(&self) -> Result<()> {
+        let connection = self.connection.lock();
+        connection.execute(
+            "INSERT INTO service_meta(key, value) VALUES('filesystem_dirty', '1')
+             ON CONFLICT(key) DO UPDATE SET value='1'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn filesystem_dirty(&self) -> Result<bool> {
+        let connection = self.connection.lock();
+        Ok(meta_optional_i64(&connection, "filesystem_dirty")? != Some(0))
+    }
+
+    pub fn mark_clean_shutdown(&self) -> Result<()> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO service_meta(key, value) VALUES('filesystem_dirty', '0')
+             ON CONFLICT(key) DO UPDATE SET value='0'",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO service_meta(key, value) VALUES('clean_shutdown', '1')
+             ON CONFLICT(key) DO UPDATE SET value='1'",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn upsert_owner(
         &self,
         owner: &OwnerRecord,
         owner_hash_mode: OwnerHashMode,
+    ) -> Result<bool> {
+        self.upsert_owner_with_topic_versions(owner, owner_hash_mode, &HashMap::new())
+    }
+
+    pub(crate) fn upsert_owner_with_topic_versions(
+        &self,
+        owner: &OwnerRecord,
+        owner_hash_mode: OwnerHashMode,
+        topic_versions: &HashMap<String, SyncTopicVersion>,
     ) -> Result<bool> {
         let now = now_ms();
         let mut connection = self.connection.lock();
@@ -390,6 +564,7 @@ impl Database {
             ],
         )?;
         let mut active_topic_ids = HashSet::new();
+        let mut applied_topic_versions = HashSet::new();
         for topic in &owner.topics {
             let key = TopicKey {
                 owner_type: owner.key.owner_type,
@@ -400,6 +575,18 @@ impl Database {
                 continue;
             }
             active_topic_ids.insert(topic.topic_id.as_str());
+            let sync_version = topic_versions.get(&topic.topic_id);
+            let topic_updated_at = sync_version
+                .map(|version| version.updated_at)
+                .unwrap_or(now);
+            let previous_source_hash = if sync_version.is_none() {
+                owner.source_config_hash.as_deref()
+            } else {
+                None
+            };
+            if sync_version.is_some() {
+                applied_topic_versions.insert(topic.topic_id.as_str());
+            }
             let source_path = owner
                 .config_path
                 .parent()
@@ -445,11 +632,15 @@ impl Database {
                     topic.config_hash,
                     topic.metadata.to_string(),
                     source_path.to_string_lossy(),
-                    now,
-                    owner.source_config_hash,
+                    topic_updated_at,
+                    previous_source_hash,
                 ],
             )?;
         }
+        anyhow::ensure!(
+            applied_topic_versions.len() == topic_versions.len(),
+            "sync topic versions contain a topic outside the reconciled owner"
+        );
 
         let mut statement = transaction.prepare(
             "SELECT topic_id FROM topics
@@ -544,16 +735,21 @@ impl Database {
         key: &AvatarKey,
         file_path: &Path,
         hash: &str,
+        mtime_ms: f64,
+        file_size: i64,
         updated_at: i64,
     ) -> Result<bool> {
         let connection = self.connection.lock();
         let changed = connection.execute(
             "INSERT INTO avatars(
-                owner_type, owner_id, file_path, hash, updated_at, deleted_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, NULL)
+                owner_type, owner_id, file_path, hash, mtime_ms, file_size,
+                updated_at, deleted_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
              ON CONFLICT(owner_type, owner_id) DO UPDATE SET
                 file_path=excluded.file_path,
                 hash=excluded.hash,
+                mtime_ms=excluded.mtime_ms,
+                file_size=excluded.file_size,
                 updated_at=CASE
                     WHEN avatars.hash IS excluded.hash THEN avatars.updated_at
                     ELSE excluded.updated_at
@@ -564,10 +760,36 @@ impl Database {
                 key.owner_id,
                 file_path.to_string_lossy(),
                 hash,
+                mtime_ms,
+                file_size,
                 updated_at,
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    pub fn avatar_source_states(&self) -> Result<HashMap<AvatarKey, AvatarSourceState>> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT owner_type, owner_id, file_path, hash, mtime_ms, file_size, deleted_at
+             FROM avatars",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                AvatarKey {
+                    owner_type: parse_avatar_owner_type(row.get::<_, String>(0)?),
+                    owner_id: row.get(1)?,
+                },
+                AvatarSourceState {
+                    file_path: PathBuf::from(row.get::<_, String>(2)?),
+                    hash: row.get(3)?,
+                    mtime_ms: row.get(4)?,
+                    file_size: row.get(5)?,
+                    deleted_at: row.get(6)?,
+                },
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
     pub fn avatar_state(&self, key: &AvatarKey) -> Result<Option<AvatarRecord>> {
@@ -1000,7 +1222,7 @@ impl Database {
                 source.key.owner_id,
                 source.key.topic_id,
                 now_ms(),
-                truncate_error(error),
+                error,
             ],
         )?;
         if owner_hash_mode == OwnerHashMode::Immediate {
@@ -1192,6 +1414,13 @@ impl Database {
         let existing = load_active_message_states(&transaction, &source.key)?;
         // Physical history is detection input, not an undelete protocol.
         let tombstoned_ids = load_message_tombstone_ids(&transaction, &source.key)?;
+        let message_digests = messages
+            .iter()
+            .map(|message| MessageDigests {
+                content_text: text_digest(&message.content_text),
+                metadata_json: text_digest(&message.metadata_json),
+            })
+            .collect::<Vec<_>>();
         let incoming_ids: HashSet<&str> = messages
             .iter()
             .filter(|message| !tombstoned_ids.contains(message.msg_id.as_str()))
@@ -1204,10 +1433,11 @@ impl Database {
         let search_changed = search_requires_rewrite
             || messages
                 .iter()
-                .filter(|message| incoming_ids.contains(message.msg_id.as_str()))
-                .any(|message| {
+                .zip(&message_digests)
+                .filter(|(message, _)| incoming_ids.contains(message.msg_id.as_str()))
+                .any(|(message, digests)| {
                     existing.get(&message.msg_id).is_none_or(|previous| {
-                        previous.content_text != message.content_text
+                        previous.content_text_digest != digests.content_text
                             || previous.speaker_name != message.speaker_name
                     })
                 });
@@ -1264,7 +1494,7 @@ impl Database {
                     updated_at=excluded.updated_at,
                     deleted_at=NULL",
             )?;
-            for message in messages {
+            for (message, digests) in messages.iter().zip(&message_digests) {
                 if tombstoned_ids.contains(message.msg_id.as_str()) {
                     continue;
                 }
@@ -1279,9 +1509,9 @@ impl Database {
                 let needs_write = previous.is_none_or(|previous| {
                     previous.ordinal != message.ordinal
                         || previous.speaker_name != message.speaker_name
-                        || previous.content_text != message.content_text
+                        || previous.content_text_digest != digests.content_text
                         || previous.message_hash != message.message_hash
-                        || previous.metadata_json != message.metadata_json
+                        || previous.metadata_json_digest != digests.metadata_json
                         || previous.updated_at != effective_updated_at
                 });
                 if !needs_write {
@@ -1306,7 +1536,7 @@ impl Database {
                 if previous.is_none() {
                     appended_row_ids.push(transaction.last_insert_rowid());
                 } else if previous.is_some_and(|previous| {
-                    previous.content_text != message.content_text
+                    previous.content_text_digest != digests.content_text
                         || previous.speaker_name != message.speaker_name
                 }) {
                     search_requires_rewrite = true;
@@ -1571,6 +1801,129 @@ impl Database {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub(crate) fn sync_history_snapshot(&self, key: &TopicKey) -> Result<SyncHistorySnapshot> {
+        let connection = self.connection.lock();
+        let source = connection
+            .query_row(
+                "SELECT t.source_path,
+                        hs.owner_type, hs.owner_id, hs.topic_id,
+                        hs.status, hs.source_hash
+                 FROM topics t
+                 JOIN owners o
+                   ON o.owner_type=t.owner_type AND o.owner_id=t.owner_id
+                 LEFT JOIN history_sources hs ON hs.source_path=t.source_path
+                 WHERE t.owner_type=?1 AND t.owner_id=?2 AND t.topic_id=?3
+                   AND t.deleted_at IS NULL AND o.deleted_at IS NULL",
+                params![key.owner_type.as_str(), key.owner_id, key.topic_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .with_context(|| {
+                format!(
+                    "sync history topic is not live: {}/{}/{}",
+                    key.owner_type.as_str(),
+                    key.owner_id,
+                    key.topic_id
+                )
+            })?;
+        let (source_path, source_owner_type, source_owner_id, source_topic_id, status, source_hash) =
+            source;
+        anyhow::ensure!(!source_path.is_empty(), "sync history source path is empty");
+        let source_owner_type =
+            source_owner_type.context("sync history topic has no matching history source")?;
+        let source_owner_id =
+            source_owner_id.context("sync history topic has no matching history source")?;
+        let source_topic_id =
+            source_topic_id.context("sync history topic has no matching history source")?;
+        anyhow::ensure!(
+            source_owner_type == key.owner_type.as_str()
+                && source_owner_id == key.owner_id
+                && source_topic_id == key.topic_id,
+            "sync history source identity does not match the requested topic"
+        );
+        anyhow::ensure!(
+            status.as_deref() == Some("ready"),
+            "sync history source is not ready"
+        );
+        let source_hash = source_hash.context("sync history source hash is missing")?;
+        anyhow::ensure!(
+            source_hash.len() == 64
+                && source_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "sync history source hash is not lowercase SHA-256"
+        );
+
+        let mut messages = Vec::new();
+        {
+            let mut statement = connection.prepare(
+                "SELECT msg_id, metadata_json
+                 FROM messages
+                 WHERE owner_type=?1 AND owner_id=?2 AND topic_id=?3
+                   AND deleted_at IS NULL
+                 ORDER BY ordinal ASC, row_id ASC",
+            )?;
+            let rows = statement.query_map(
+                params![key.owner_type.as_str(), key.owner_id, key.topic_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            for row in rows {
+                let (msg_id, metadata_json) = row?;
+                anyhow::ensure!(!msg_id.is_empty(), "sync history message id is empty");
+                let message: Value = serde_json::from_str(&metadata_json)
+                    .with_context(|| format!("stored message {msg_id} metadata is invalid JSON"))?;
+                let message_id = message
+                    .as_object()
+                    .with_context(|| format!("stored message {msg_id} metadata is not an object"))?
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .with_context(|| format!("stored message {msg_id} metadata id is missing"))?;
+                anyhow::ensure!(
+                    message_id == msg_id,
+                    "stored message metadata id {message_id} does not match database id {msg_id}"
+                );
+                messages.push(message);
+            }
+        }
+
+        let mut tombstone_ids = HashSet::new();
+        {
+            let mut statement = connection.prepare(
+                "SELECT msg_id FROM messages
+                 WHERE owner_type=?1 AND owner_id=?2 AND topic_id=?3
+                   AND deleted_at IS NOT NULL",
+            )?;
+            let rows = statement.query_map(
+                params![key.owner_type.as_str(), key.owner_id, key.topic_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            for row in rows {
+                let msg_id = row?;
+                anyhow::ensure!(!msg_id.is_empty(), "sync history tombstone id is empty");
+                anyhow::ensure!(
+                    tombstone_ids.insert(msg_id.clone()),
+                    "sync history contains duplicate tombstone id {msg_id}"
+                );
+            }
+        }
+
+        Ok(SyncHistorySnapshot {
+            source_path: PathBuf::from(source_path),
+            source_hash,
+            messages,
+            tombstone_ids,
+        })
     }
 
     pub(crate) fn message_tombstone_ids(&self, key: &TopicKey) -> Result<HashSet<String>> {
@@ -1854,9 +2207,9 @@ fn migrate_sync_hash_contract(transaction: &Transaction<'_>) -> Result<()> {
             match stored_message_fingerprint(&metadata_json, &key.topic_id) {
                 Ok(hash) => hash,
                 Err(error) => {
-                    invalid_topics.entry(key.clone()).or_insert_with(|| {
-                        truncate_error(&format!("stored message is not syncable: {error:#}"))
-                    });
+                    invalid_topics
+                        .entry(key.clone())
+                        .or_insert_with(|| format!("stored message is not syncable: {error:#}"));
                     String::new()
                 }
             }
@@ -1945,12 +2298,25 @@ fn migrate_sync_hash_contract(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn table_has_column(transaction: &Transaction<'_>, table: &str, column: &str) -> Result<bool> {
-    let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns.iter().any(|name| name == column))
+}
+
+fn ensure_avatar_source_metadata(transaction: &Transaction<'_>) -> Result<()> {
+    if !table_has_column(transaction, "avatars", "mtime_ms")? {
+        transaction
+            .execute_batch("ALTER TABLE avatars ADD COLUMN mtime_ms REAL NOT NULL DEFAULT 0;")?;
+    }
+    if !table_has_column(transaction, "avatars", "file_size")? {
+        transaction.execute_batch(
+            "ALTER TABLE avatars ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
 }
 
 fn owner_is_tombstoned(transaction: &Transaction<'_>, key: &OwnerKey) -> Result<bool> {
@@ -2020,6 +2386,8 @@ fn mark_avatar_deleted(
             owner_type, owner_id, file_path, hash, updated_at, deleted_at
          ) VALUES(?1, ?2, '', ?3, ?4, ?4)
          ON CONFLICT(owner_type, owner_id) DO UPDATE SET
+            mtime_ms=0,
+            file_size=0,
             updated_at=CASE
                 WHEN avatars.deleted_at IS NULL THEN excluded.deleted_at
                 ELSE MIN(avatars.updated_at, excluded.deleted_at)
@@ -2202,9 +2570,18 @@ struct ActiveMessageState {
     ordinal: i64,
     message_hash: String,
     updated_at: i64,
-    content_text: String,
+    content_text_digest: [u8; 32],
     speaker_name: Option<String>,
-    metadata_json: String,
+    metadata_json_digest: [u8; 32],
+}
+
+struct MessageDigests {
+    content_text: [u8; 32],
+    metadata_json: [u8; 32],
+}
+
+fn text_digest(value: &str) -> [u8; 32] {
+    Sha256::digest(value.as_bytes()).into()
 }
 
 fn load_active_message_states(
@@ -2227,9 +2604,9 @@ fn load_active_message_states(
                     ordinal: row.get(2)?,
                     message_hash: row.get(3)?,
                     updated_at: row.get(4)?,
-                    content_text: row.get(5)?,
+                    content_text_digest: text_digest(&row.get::<_, String>(5)?),
                     speaker_name: row.get(6)?,
-                    metadata_json: row.get(7)?,
+                    metadata_json_digest: text_digest(&row.get::<_, String>(7)?),
                 },
             ))
         },
@@ -2365,10 +2742,6 @@ fn meta_optional_i64(connection: &Connection, key: &str) -> Result<Option<i64>> 
     Ok(value.and_then(|value| value.parse().ok()))
 }
 
-fn truncate_error(error: &str) -> String {
-    error.chars().take(500).collect()
-}
-
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2407,6 +2780,199 @@ mod tests {
         let database =
             Database::open(&directory.path().join("chat.sqlite3")).expect("open test database");
         (directory, database)
+    }
+
+    #[test]
+    fn sync_history_snapshot_preserves_wire_messages_and_source_state() {
+        let (directory, database) = test_database();
+        let key = TopicKey {
+            owner_type: OwnerType::Agent,
+            owner_id: "agent-a".to_string(),
+            topic_id: "topic-a".to_string(),
+        };
+        let source_path = directory.path().join("missing-history.json");
+        let source_hash = "a".repeat(64);
+        {
+            let connection = database.connection.lock();
+            connection
+                .execute(
+                    "INSERT INTO owners(
+                        owner_type, owner_id, display_name, config_path, config_hash, updated_at
+                     ) VALUES('agent', 'agent-a', 'Agent', 'agent.json', 'config-hash', 1)",
+                    [],
+                )
+                .expect("insert snapshot owner");
+            connection
+                .execute(
+                    "INSERT INTO topics(
+                        owner_type, owner_id, topic_id, config_hash, metadata_json,
+                        source_path, updated_at
+                     ) VALUES('agent', 'agent-a', 'topic-a', 'topic-hash', '{}', ?1, 1)",
+                    [source_path.to_string_lossy().as_ref()],
+                )
+                .expect("insert snapshot topic");
+            connection
+                .execute(
+                    "INSERT INTO history_sources(
+                        source_path, owner_type, owner_id, topic_id, mtime_ns, file_size,
+                        source_hash, last_revision, indexed_at, status, last_error
+                     ) VALUES(?1, 'agent', 'agent-a', 'topic-a', 1, 2, ?2, 3, 4, 'ready', NULL)",
+                    params![source_path.to_string_lossy().as_ref(), source_hash],
+                )
+                .expect("insert ready history source");
+            for (msg_id, ordinal, metadata_json, deleted_at) in [
+                (
+                    "message-late",
+                    20_i64,
+                    serde_json::json!({
+                        "id": "message-late",
+                        "role": "assistant",
+                        "content": "late",
+                        "timestamp": 20,
+                        "desktopOnly": { "sequence": 2 }
+                    })
+                    .to_string(),
+                    None,
+                ),
+                (
+                    "message-early",
+                    10_i64,
+                    serde_json::json!({
+                        "id": "message-early",
+                        "role": "user",
+                        "content": "early",
+                        "timestamp": 10,
+                        "desktopOnly": { "sequence": 1, "preserved": true }
+                    })
+                    .to_string(),
+                    None,
+                ),
+                (
+                    "message-deleted",
+                    5_i64,
+                    serde_json::json!({
+                        "id": "message-deleted",
+                        "role": "user",
+                        "content": "gone",
+                        "timestamp": 5
+                    })
+                    .to_string(),
+                    Some(99_i64),
+                ),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO messages(
+                            owner_type, owner_id, topic_id, msg_id, ordinal, role,
+                            content_raw, content_text, timestamp, message_hash,
+                            metadata_json, updated_at, deleted_at
+                         ) VALUES('agent', 'agent-a', 'topic-a', ?1, ?2, 'user',
+                                  '', '', ?2, ?3, ?4, ?2, ?5)",
+                        params![msg_id, ordinal, "b".repeat(64), metadata_json, deleted_at],
+                    )
+                    .expect("insert snapshot message");
+            }
+        }
+
+        let snapshot = database
+            .sync_history_snapshot(&key)
+            .expect("load committed sync history snapshot");
+        assert_eq!(snapshot.source_path, source_path);
+        assert_eq!(snapshot.source_hash, "a".repeat(64));
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message["id"].as_str().expect("snapshot message id"))
+                .collect::<Vec<_>>(),
+            vec!["message-early", "message-late"]
+        );
+        assert_eq!(snapshot.messages[0]["desktopOnly"]["sequence"], 1);
+        assert_eq!(snapshot.messages[0]["desktopOnly"]["preserved"], true);
+        assert_eq!(
+            snapshot.tombstone_ids,
+            HashSet::from(["message-deleted".to_string()])
+        );
+        assert!(
+            !source_path.exists(),
+            "snapshot must not read the physical file"
+        );
+
+        {
+            let connection = database.connection.lock();
+            connection
+                .execute(
+                    "UPDATE history_sources SET source_hash=?2 WHERE source_path=?1",
+                    params![source_path.to_string_lossy().as_ref(), "A".repeat(64)],
+                )
+                .expect("poison snapshot source hash");
+        }
+        assert!(database.sync_history_snapshot(&key).is_err());
+
+        {
+            let connection = database.connection.lock();
+            connection
+                .execute(
+                    "UPDATE history_sources SET source_hash=?2, status='invalid'
+                     WHERE source_path=?1",
+                    params![source_path.to_string_lossy().as_ref(), "a".repeat(64)],
+                )
+                .expect("poison snapshot source status");
+        }
+        assert!(database.sync_history_snapshot(&key).is_err());
+    }
+
+    #[test]
+    fn clean_shutdown_enables_fast_start_while_unclean_exit_requires_recovery() {
+        let directory = tempfile::tempdir().expect("create startup-state directory");
+        let path = directory.path().join("chat.sqlite3");
+
+        let first = Database::open(&path).expect("create database");
+        let first_state = first.startup_state();
+        assert!(first_state.schema_migrated);
+        assert!(first_state.integrity_checked);
+        assert!(first_state.requires_startup_reconcile());
+        first
+            .mark_clean_shutdown()
+            .expect("commit clean first shutdown");
+        drop(first);
+
+        let clean = Database::open(&path).expect("reopen clean database");
+        let clean_state = clean.startup_state();
+        assert!(clean_state.database_existed);
+        assert!(clean_state.previous_clean_shutdown);
+        assert!(!clean_state.filesystem_dirty);
+        assert!(!clean_state.schema_migrated);
+        assert!(!clean_state.integrity_checked);
+        assert!(!clean_state.requires_startup_reconcile());
+        // Dropping without mark_clean_shutdown simulates process termination.
+        drop(clean);
+
+        let unclean = Database::open(&path).expect("reopen after unclean exit");
+        let unclean_state = unclean.startup_state();
+        assert!(!unclean_state.previous_clean_shutdown);
+        assert!(unclean_state.integrity_checked);
+        assert!(unclean_state.requires_startup_reconcile());
+    }
+
+    #[test]
+    fn filesystem_dirty_survives_reconcile_metadata_until_clean_shutdown() {
+        let (_directory, database) = test_database();
+        database
+            .mark_filesystem_dirty()
+            .expect("persist filesystem dirty state");
+        database
+            .set_last_reconcile_at(123)
+            .expect("record reconcile timestamp");
+        assert!(
+            database.filesystem_dirty().expect("read dirty state"),
+            "a running reconcile must not erase watcher events racing with it"
+        );
+
+        database
+            .mark_clean_shutdown()
+            .expect("commit clean shutdown");
+        assert!(!database.filesystem_dirty().expect("read clean state"));
     }
 
     #[test]
@@ -2477,6 +3043,94 @@ mod tests {
             )
             .expect("query collapsed state");
         assert_eq!(state, (90, 80, 70, "3".to_string(), 0));
+    }
+
+    #[test]
+    fn upstream_schema_three_avatar_rows_migrate_and_require_recovery() {
+        let directory = tempfile::tempdir().expect("create temp database directory");
+        let path = directory.path().join("chat.sqlite3");
+        {
+            let connection = Connection::open(&path).expect("open legacy avatar database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE avatars (
+                        owner_type TEXT NOT NULL,
+                        owner_id TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        hash TEXT NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        deleted_at INTEGER,
+                        PRIMARY KEY (owner_type, owner_id)
+                     );
+                     CREATE TABLE service_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     INSERT INTO service_meta VALUES
+                        ('schema_version', '3'),
+                        ('clean_shutdown', '1'),
+                        ('filesystem_dirty', '0');
+                     INSERT INTO avatars VALUES(
+                        'agent', 'agent-a', 'avatar.png',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        7, NULL
+                     );",
+                )
+                .expect("seed legacy avatar schema");
+        }
+
+        let database = Database::open(&path).expect("upgrade avatar source metadata");
+        let startup_state = database.startup_state();
+        assert!(startup_state.previous_clean_shutdown);
+        assert!(!startup_state.filesystem_dirty);
+        assert!(startup_state.schema_migrated);
+        assert!(startup_state.integrity_checked);
+        assert!(startup_state.requires_startup_reconcile());
+        {
+            let connection = database.connection.lock();
+            let state: (f64, i64, String, i64, Option<i64>, String) = connection
+                .query_row(
+                    "SELECT mtime_ms, file_size, hash, updated_at, deleted_at,
+                            (SELECT value FROM service_meta WHERE key='schema_version')
+                     FROM avatars WHERE owner_type='agent' AND owner_id='agent-a'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .expect("query migrated avatar row");
+            assert_eq!(
+                state,
+                (
+                    0.0,
+                    0,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    7,
+                    None,
+                    "3".to_string(),
+                )
+            );
+        }
+        assert!(
+            database
+                .filesystem_dirty()
+                .expect("read migration recovery intent"),
+            "same-version storage migration must force one recovery reconcile"
+        );
+
+        database
+            .mark_clean_shutdown()
+            .expect("complete migrated clean shutdown");
+        drop(database);
+        let clean = Database::open(&path).expect("reopen migrated database");
+        let clean_state = clean.startup_state();
+        assert!(!clean_state.schema_migrated);
+        assert!(!clean_state.integrity_checked);
+        assert!(!clean_state.requires_startup_reconcile());
     }
 
     #[test]

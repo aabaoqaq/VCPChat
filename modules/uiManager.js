@@ -19,6 +19,9 @@ const uiManager = (() => {
     let uiHelperCapability = null;
     let disposed = false;
     let generation = 0;
+    const saveSettingPatch = (patch) => electronAPI?.saveSettings?.({
+        __vcpSettingsOps: Object.entries(patch || {}).map(([key, value]) => ({ op: 'set', path: [key], value })),
+    });
     let themeDisposer = null;
     const tasks = new Set();
     const fallbackTimers = new Set();
@@ -76,7 +79,7 @@ const uiManager = (() => {
                     const nextSettings = { ...currentSettings, [settingKey]: roundedWidth };
                     globalSettingsRef.set(nextSettings);
                     try {
-                        await electronAPI.saveSettings(nextSettings);
+                        await saveSettingPatch({ [settingKey]: roundedWidth });
                         console.log('Sidebar width saved to settings.');
                     } catch (error) {
                         console.error('Failed to save sidebar width:', error);
@@ -116,10 +119,19 @@ const uiManager = (() => {
         const channelAlreadyApplied = channelState?.ready === true
             && channelState.effective === theme;
 
+        const root = document.documentElement;
+        const rootNeedsSync = Boolean(
+            root && (
+                root.classList.contains('light-theme') !== shouldUseLight
+                || root.classList.contains('dark-theme') === shouldUseLight
+                || root.dataset.vcpTheme !== theme
+            )
+        );
+
         // setThemeMode() performs an optimistic renderer-side update and the main
         // process broadcasts the persisted value afterwards. Keep this operation
         // idempotent so that the echo cannot invalidate and repaint the whole tree.
-        if (domAlreadyApplied && channelAlreadyApplied) {
+        if (domAlreadyApplied && channelAlreadyApplied && !rootNeedsSync) {
             return false;
         }
 
@@ -128,6 +140,17 @@ const uiManager = (() => {
         if (!domAlreadyApplied) {
             body.classList.toggle('light-theme', shouldUseLight);
             body.classList.toggle('dark-theme', !shouldUseLight);
+        }
+        // Theme selectors and the UI-system token contract both consume this
+        // attribute. Keep it in lockstep with the legacy classes so a theme
+        // update cannot leave Web Awesome scopes resolving the previous
+        // palette while the document visually reports the new mode.
+        if (body.dataset.vcpTheme !== theme) body.dataset.vcpTheme = theme;
+
+        if (root) {
+            root.classList.toggle('light-theme', shouldUseLight);
+            root.classList.toggle('dark-theme', !shouldUseLight);
+            if (root.dataset.vcpTheme !== theme) root.dataset.vcpTheme = theme;
         }
 
         if (!channelAlreadyApplied) {
@@ -391,7 +414,7 @@ const uiManager = (() => {
                     leftSidebar.classList.remove('avatar-only');
                     const settings = { ...globalSettingsRef.get(), sidebarAvatarOnly: false };
                     globalSettingsRef.set(settings);
-                    electronAPI?.saveSettings?.(settings).catch(error => {
+                    saveSettingPatch({ sidebarAvatarOnly: false })?.catch(error => {
                         console.error('[UIManager] Failed to save compact sidebar state:', error);
                     });
                     switchToTab('settings');
@@ -436,10 +459,26 @@ const uiManager = (() => {
             leftSidebar.classList.remove('avatar-only');
             const settings = { ...globalSettingsRef.get(), sidebarAvatarOnly: false };
             globalSettingsRef.set(settings);
-            electronAPI?.saveSettings?.(settings).catch(error => {
+            saveSettingPatch({ sidebarAvatarOnly: false })?.catch(error => {
                 console.error('[UIManager] Failed to save avatar-only sidebar state:', error);
             });
         }
+
+        // Settings is an owned surface. Leaving the tab physically detaches
+        // its form from the sidebar, so sticky actions and focusable controls
+        // cannot overlap or intercept the Agent list.
+        if (targetTab !== 'settings') {
+            const activeEl = document.activeElement;
+            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA') && activeEl.closest?.('#agentSettingsForm, #groupSettingsForm')) {
+                try { activeEl.blur(); } catch (_) {}
+            }
+            if (window.settingsManager?.flushPendingSave) {
+                window.settingsManager.flushPendingSave().catch(e => {
+                    console.warn('[UIManager] Error flushing settings before tab switch:', e);
+                });
+            }
+        }
+        window.VCPSettingsSidebar?.setPanelActive?.(targetTab === 'settings');
 
         if (sidebarTabButtons) {
             sidebarTabButtons.forEach(btn => {
@@ -548,6 +587,9 @@ const uiManager = (() => {
                 initializeDigitalClock();
                 setupSidebarTabs();
                 setupCompactSidebarNavigation();
+                if (!document.querySelector('.sidebar-tab-button.active[data-tab="settings"]')) {
+                    window.VCPSettingsSidebar?.setPanelActive?.(false);
+                }
             } finally {
                 releaseCapturedListeners();
             }

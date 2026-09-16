@@ -8,6 +8,7 @@ import { createMessageRenderer } from '../modules/messageRenderer.js';
 import { createStreamProjection } from '../modules/renderer/streamManager.js';
 import { createStreamTransientHistory } from '../modules/chat/streamTransientHistory.js';
 import { createTtsSurfaceOwner } from '../modules/renderer/ttsSurfaceOwner.js';
+import { createSingleChatRequestOrchestrator } from '../modules/chat/singleChatRequestOrchestrator.js';
 
 const streamManager = createStreamProjection();
 const messageRenderer = createMessageRenderer({ streamManager });
@@ -18,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sendMessageBtn = document.getElementById('sendMessageBtn');
     const agentAvatarImg = document.getElementById('agentAvatar');
     const agentNameSpan = document.getElementById('currentChatAgentName');
+    const voiceInputShortcutStatus = document.getElementById('voiceInputShortcutStatus');
     const closeBtn = document.getElementById('close-btn-voicechat');
     const toggleInputModeBtn = document.getElementById('toggleInputModeBtn');
     const keyboardIcon = document.getElementById('keyboard-icon');
@@ -46,8 +48,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let streamRuntime = null;
     let inputMode = 'text'; // 'text' or 'voice'
     const markedInstance = new window.marked.Marked({ gfm: true, breaks: true });
-    let speechRecognitionTimeout = null;
-    const SPEECH_TIMEOUT_DURATION = 3000; // 3 seconds
+    const singleChatRequestOrchestrator = createSingleChatRequestOrchestrator({
+        electronAPI: window.electronAPI,
+    });
 
     // Local UI Helper for this window
     const uiHelperFunctions = {
@@ -175,7 +178,8 @@ document.addEventListener('DOMContentLoaded', () => {
             sendMessage(messageInput.value);
         }
     });
-    toggleInputModeBtn.addEventListener('click', toggleMode);
+    toggleInputModeBtn.disabled = true;
+    toggleInputModeBtn.title = '请使用全局按住说话快捷键';
 
     // --- Initialization ---
     // 等待 electronAPI 加载完成
@@ -203,8 +207,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function getVoiceRuntimeSettings(settings = {}) {
         return {
             voiceMode: settings.voiceMode === 'network' ? 'network' : 'local',
-            speechRecognizerBrowserPath: settings.speechRecognizerBrowserPath || '',
-            speechRecognizerPagePath: settings.speechRecognizerPagePath || 'Voicechatmodules/recognizer.html',
+            voiceInputMode: ['windows_voice_typing', 'right_alt_hold'].includes(settings.voiceInputMode)
+                ? settings.voiceInputMode
+                : 'windows_voice_typing',
+            voiceInputShortcut: settings.voiceInputShortcut || 'F7',
             voiceNetworkSettings: settings.voiceNetworkSettings || { providerUrl: '', providerKey: '' },
             voiceLocalSettings: settings.voiceLocalSettings || { sovitsUrl: '', sovitsKey: '' }
         };
@@ -235,12 +241,54 @@ document.addEventListener('DOMContentLoaded', () => {
 
         document.body.classList.toggle('light-theme', theme === 'light');
         document.body.classList.toggle('dark-theme', theme === 'dark');
+        const nativeStatus = await window.electronAPI.getNativeVoiceInputStatus?.();
+        renderVoiceInputShortcutStatus(
+            nativeStatus?.shortcut?.registered
+                ? {
+                    success: true,
+                    registered: true,
+                    shortcut: nativeStatus.shortcut.value || globalSettings.voiceInputShortcut,
+                }
+                : {
+                    success: false,
+                    registered: false,
+                    error: `快捷键 ${globalSettings.voiceInputShortcut} 未注册`,
+                }
+        );
         agentAvatarImg.src = agentConfig.avatarUrl || '../assets/default_avatar.png';
         agentNameSpan.textContent = `${agentConfig.name} - ${getVoiceModeLabel(globalSettings)}`;
 
         initializeRenderer();
         });
     });
+
+    async function interruptActiveVoiceRequest(messageId) {
+        if (!messageId || activeStreamingMessageId !== messageId) {
+            return { success: false, error: '消息当前没有正在进行的请求。' };
+        }
+        if (typeof window.electronAPI.interruptVcpRequest !== 'function') {
+            return { success: false, error: '中止请求接口不可用。' };
+        }
+
+        try {
+            const result = await window.electronAPI.interruptVcpRequest({ messageId });
+            if (!result?.success) {
+                return {
+                    success: false,
+                    error: result?.error || '主进程未能中止请求。',
+                };
+            }
+
+            // The backend has accepted the interrupt. Finalize this auxiliary
+            // window immediately instead of depending on a later socket-close
+            // event, which may be absent or filtered after server-side abort.
+            await streamRuntime?.cancel(messageId, 'user-interrupt');
+            return result;
+        } catch (error) {
+            console.error(`[VoiceChat] Failed to interrupt request ${messageId}:`, error);
+            return { success: false, error: error.message || String(error) };
+        }
+    }
 
     function initializeRenderer() {
         if (messageRenderer) {
@@ -294,7 +342,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 uiHelper: uiHelperFunctions, // Pass the local helper
                 messageCommands: { handleSendMessage: text => sendMessage(text) },
                 summarizeTopicFromMessages: window.summarizeTopicFromMessages || (async () => ""),
-                handleCreateBranch: () => {} // Stub
+                handleCreateBranch: () => {}, // Stub
+                interruptHandler: {
+                    interrupt: interruptActiveVoiceRequest,
+                },
             });
             ttsSurfaceOwner = createTtsSurfaceOwner({
                 subscribePlay: callback => window.electronAPI.onPlayTtsAudio(callback),
@@ -345,26 +396,66 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function toggleMode() {
-        if (inputMode === 'text') {
-            inputMode = 'voice';
-            keyboardIcon.style.display = 'none';
-            micIcon.style.display = 'block';
-            messageInput.placeholder = `正在聆听... (${getVoiceModeLabel(globalSettings)})`;
-            messageInput.value = '';
-            window.electronAPI.startSpeechRecognition();
-        } else {
-            inputMode = 'text';
-            keyboardIcon.style.display = 'block';
-            micIcon.style.display = 'none';
-            messageInput.placeholder = '输入消息...';
-            window.electronAPI.stopSpeechRecognition();
-            clearTimeout(speechRecognitionTimeout);
-        }
+    function applyNativeCapturePresentation(active) {
+        inputMode = active ? 'voice' : 'text';
+        keyboardIcon.style.display = active ? 'none' : 'block';
+        micIcon.style.display = active ? 'block' : 'none';
+        toggleInputModeBtn.setAttribute('aria-pressed', String(active));
+        const voiceInputModeLabel = globalSettings.voiceInputMode === 'right_alt_hold'
+            ? '右 Alt'
+            : 'Win+H';
+        messageInput.placeholder = active
+            ? `正在使用 ${voiceInputModeLabel} 系统听写...`
+            : '输入消息或使用全局语音快捷键...';
     }
 
+    function renderVoiceInputShortcutStatus(status, state = null) {
+        if (!voiceInputShortcutStatus) return;
+        voiceInputShortcutStatus.classList.remove('is-ready', 'is-active', 'is-error');
+
+        if (state === 'active') {
+            voiceInputShortcutStatus.classList.add('is-active');
+            voiceInputShortcutStatus.textContent = `${status?.shortcut || globalSettings.voiceInputShortcut || '快捷键'} 已触发`;
+            return;
+        }
+
+        if (status?.success && status?.registered !== false) {
+            voiceInputShortcutStatus.classList.add('is-ready');
+            voiceInputShortcutStatus.textContent = `${status.shortcut || globalSettings.voiceInputShortcut || '快捷键'} 已注册`;
+            return;
+        }
+
+        const error = status?.error || '快捷键未注册';
+        voiceInputShortcutStatus.classList.add('is-error');
+        voiceInputShortcutStatus.textContent = error;
+        voiceInputShortcutStatus.title = error;
+    }
+
+    window.electronAPI.onVoiceInputShortcutStatus?.((status) => {
+        applyNativeCapturePresentation(status?.active === true);
+        renderVoiceInputShortcutStatus(status, status?.active === true ? 'active' : null);
+        if (status?.success) return;
+        const error = status?.error || '语音输入快捷键注册失败';
+        console.warn('[VoiceChat] Voice input shortcut unavailable:', error);
+        if (inputMode === 'text') {
+            messageInput.placeholder = `快捷键不可用：${error}`;
+        }
+    });
+
+    window.electronAPI.onVoiceInputCapturedText?.((payload) => {
+        const text = String(payload?.text || '').trim();
+        applyNativeCapturePresentation(false);
+        if (!text) return;
+        messageInput.value = text;
+        sendMessage(text).catch(error => {
+            console.error('[VoiceChat] Failed to send captured voice text:', error);
+            messageInput.disabled = false;
+            sendMessageBtn.disabled = false;
+            messageInput.value = text;
+        });
+    });
+
     const sendMessage = async (messageContent) => {
-        clearTimeout(speechRecognitionTimeout); // Stop any pending auto-send
         if (!messageContent.trim() || !agentConfig || !messageRenderer) return;
 
         const userMessage = { role: 'user', content: messageContent, timestamp: Date.now(), id: `user_msg_${Date.now()}` };
@@ -395,33 +486,17 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         try {
-            const voiceModePromptInjection = "\n\n当前处于语音模式中，你的回复应当口语化，内容简短直白。由于用户输入同样是语音识别模型构成，注意自主判断、理解其中的同音错别字或者错误语义识别。";
-            const systemPrompt = (agentConfig.systemPrompt || '').replace(/\{\{AgentName\}\}/g, agentConfig.name) + voiceModePromptInjection;
-            
-            const messagesForVCP = [];
-            if (systemPrompt) {
-                messagesForVCP.push({ role: 'system', content: [{ type: 'text', text: systemPrompt }] });
-            }
-
-            const historyForVCP = currentChatHistory.filter(msg => !msg.isThinking).map(msg => {
-                const contentPayload = (typeof msg.content === 'string')
-                    ? [{ type: 'text', text: msg.content }]
-                    : msg.content;
-                return { role: msg.role, content: contentPayload };
+            const voiceModePromptInjection = '当前处于语音模式中，你的回复应当口语化，内容简短直白。由于用户输入同样是语音识别模型构成，注意自主判断、理解其中的同音错别字或者错误语义识别。';
+            await singleChatRequestOrchestrator.send({
+                settings: globalSettings,
+                agentConfig,
+                history: currentChatHistory,
+                messageId: thinkingMessageId,
+                context,
+                currentUserMessageId: userMessage.id,
+                systemPromptAppend: voiceModePromptInjection,
+                modelConfigOverrides: { stream: true },
             });
-            messagesForVCP.push(...historyForVCP);
-
-            const modelConfig = {
-                model: agentConfig.model,
-                temperature: agentConfig.temperature,
-                stream: true,
-                ...(agentConfig.maxOutputTokens && { max_tokens: parseInt(agentConfig.maxOutputTokens, 10) }),
-                ...(agentConfig.contextTokenLimit && { contextTokenLimit: parseInt(agentConfig.contextTokenLimit, 10) }),
-                ...(agentConfig.top_p && { top_p: parseFloat(agentConfig.top_p) }),
-                ...(agentConfig.top_k && { top_k: parseInt(agentConfig.top_k, 10) })
-            };
-
-            await window.electronAPI.sendToVCP(globalSettings.vcpServerUrl, globalSettings.vcpApiKey, messagesForVCP, modelConfig, thinkingMessageId, false, context);
 
         } catch (error) {
             console.error('Error sending message to VCP:', error);
@@ -438,6 +513,28 @@ document.addEventListener('DOMContentLoaded', () => {
         streamRuntime.accept(eventData);
     });
     
+    function extractSpeakableTextFallback(contentElement) {
+        if (!contentElement) return '';
+
+        const contentClone = contentElement.cloneNode(true);
+        contentClone.querySelectorAll(
+            '[data-vcp-block-type], .vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .vcp-flowlock-bubble, .maid-diary-bubble, .maid-diary-update-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, .highlighted-tag, .highlighted-alert-tag, style, script'
+        ).forEach(el => el.remove());
+
+        return (contentClone.innerText || contentClone.textContent || '')
+            // 最终 DOM 理论上已将完整工具协议转换为气泡；以下规则覆盖异常
+            // 历史 DOM 或边界粘连后仍残留为纯文本的完整协议块。
+            .replace(/<<<\[TOOL_REQUEST\]>>>[\s\S]*?<{2,4}\[END_TOOL_REQUEST\]>{2,4}/gi, '')
+            .replace(/\[\[VCP调用结果信息汇总:[\s\S]*?VCP调用结果结束\]\]/gi, '')
+            .replace(/\[本轮工具调用摘要:\][\s\S]*?\[本轮工具调用摘要结束\]/gi, '')
+            .replace(/<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>/gi, '')
+            .replace(/@!?[\u4e00-\u9fa5A-Za-z0-9_]+/g, '')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/[ \t]{2,}/g, ' ')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
     // 新增：智能文本提取和TTS触发函数，包含重试机制
     function extractTextAndPlayTTS(messageId, retryCount = 0) {
         const maxRetries = 10;
@@ -451,9 +548,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (contentElement && messageRenderer?.extractSpeakableTextFromContentElement) {
                 textToSpeak = messageRenderer.extractSpeakableTextFromContentElement(contentElement);
             } else if (contentElement) {
-                const contentClone = contentElement.cloneNode(true);
-                contentClone.querySelectorAll('.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script').forEach(el => el.remove());
-                textToSpeak = (contentClone.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
+                textToSpeak = extractSpeakableTextFallback(contentElement);
             } else {
                 textToSpeak = messageElement.textContent || messageElement.innerText;
             }
@@ -488,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (contentElement) {
                             const backupText = messageRenderer?.extractSpeakableTextFromContentElement
                                 ? messageRenderer.extractSpeakableTextFromContentElement(contentElement)
-                                : (contentElement.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
+                                : extractSpeakableTextFallback(contentElement);
                             if (backupText.trim().length > 0) {
                                 console.log(`[VoiceChat] 使用备用元素提取到文本长度: ${backupText.trim().length}`);
                                 playTTS(backupText.trim(), messageId);
@@ -533,19 +628,4 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.classList.toggle('dark-theme', theme !== 'light');
     });
 
-    // --- Speech Recognition IPC Listener ---
-    window.electronAPI.onSpeechRecognitionResult((text) => {
-        messageInput.value = text;
-
-        // Reset the timeout every time new text is received
-        clearTimeout(speechRecognitionTimeout);
-        if (messageInput.value.trim() !== '') {
-            speechRecognitionTimeout = setTimeout(() => {
-                if (messageInput.value.trim()) {
-                    console.log('Speech unchanged for 3 seconds, sending message.');
-                    sendMessage(messageInput.value);
-                }
-            }, SPEECH_TIMEOUT_DURATION);
-        }
-    });
 });

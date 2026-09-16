@@ -37,8 +37,18 @@ class ModularPromptModule {
      * @param {Object} config 
      */
     async updateContext(agentId, config) {
+        this.contextVersion = (this.contextVersion || 0) + 1;
         this.agentId = agentId;
         this.config = config;
+        this.container = null;
+        this.blocksContainer = null;
+        this.warehouseContainer = null;
+        this.draggedBlock = null;
+        this.draggedIndex = null;
+        this.draggedHiddenBlock = null;
+        this.draggedWarehouse = null;
+        document.querySelectorAll('.edit-hidden-block-dialog, .block-context-menu')
+            .forEach(node => node.remove());
         await this.loadData();
     }
 
@@ -46,8 +56,14 @@ class ModularPromptModule {
      * [修改后] 加载保存的数据（包括私有和全局）
      */
     async loadData() {
-        // 1. 加载Agent私有数据（逻辑不变）
-        const savedData = this.config.advancedSystemPrompt;
+        const contextVersion = this.contextVersion;
+        this.blocks = [];
+        this.hiddenBlocks = { default: [] };
+        this.warehouseOrder = ['default'];
+        this.currentWarehouse = 'default';
+        this.viewMode = false;
+        // 不与已加载配置共享可变数组，编辑草稿不能污染权威配置。
+        const savedData = structuredClone(this.config.advancedSystemPrompt);
         if (savedData && typeof savedData === 'object') {
             this.blocks = savedData.blocks || [];
             this.hiddenBlocks = savedData.hiddenBlocks || { default: [] };
@@ -63,6 +79,7 @@ class ModularPromptModule {
         // 2. [新增] 加载全局仓库数据
         try {
             const response = await this.electronAPI.getGlobalWarehouse();
+            if (contextVersion !== this.contextVersion) return;
             if (response.success) {
                 this.hiddenBlocks['global'] = response.data || [];
             } else {
@@ -70,6 +87,7 @@ class ModularPromptModule {
                 this.hiddenBlocks['global'] = [];
             }
         } catch (error) {
+            if (contextVersion !== this.contextVersion) return;
             console.error('Error invoking get-global-warehouse:', error);
             this.hiddenBlocks['global'] = [];
         }
@@ -160,35 +178,43 @@ class ModularPromptModule {
         const toolbar = document.createElement('div');
         toolbar.className = 'modular-toolbar';
 
+        const btnGroup = document.createElement('div');
+        btnGroup.className = 'toolbar-btn-group';
+
         // 添加积木块按钮
         const addBtn = document.createElement('button');
-        addBtn.className = 'toolbar-btn';
-        addBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> 添加积木块';
+        addBtn.type = 'button';
+        addBtn.className = 'toolbar-btn add-block-btn';
+        addBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg><span>积木块</span>';
+        addBtn.title = '添加积木块';
         addBtn.onclick = () => this.addBlock('text');
-        toolbar.appendChild(addBtn);
+        btnGroup.appendChild(addBtn);
 
         // 添加换行块按钮
         const addNewlineBtn = document.createElement('button');
-        addNewlineBtn.className = 'toolbar-btn';
-        addNewlineBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3h10M3 8h10M3 13h10" stroke="currentColor" stroke-width="2"/></svg> 添加换行';
+        addNewlineBtn.type = 'button';
+        addNewlineBtn.className = 'toolbar-btn add-newline-btn';
+        addNewlineBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h12"/></svg><span>换行</span>';
+        addNewlineBtn.title = '添加换行';
         addNewlineBtn.onclick = () => this.addBlock('newline');
-        toolbar.appendChild(addNewlineBtn);
+        btnGroup.appendChild(addNewlineBtn);
 
-        // 创建右侧控制组
-        const controlsGroup = document.createElement('div');
-        controlsGroup.className = 'toolbar-controls-group';
+        toolbar.appendChild(btnGroup);
 
         // View 模式开关
         const viewModeToggle = document.createElement('label');
-        viewModeToggle.className = 'toolbar-toggle';
+        viewModeToggle.className = `toolbar-toggle${this.viewMode ? ' active' : ''}`;
+        viewModeToggle.title = '切换预览模式';
         viewModeToggle.innerHTML = `
             <input type="checkbox" ${this.viewMode ? 'checked' : ''} id="viewModeCheckbox">
-            <span>预览模式</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <span>预览</span>
         `;
-        viewModeToggle.querySelector('input').onchange = (e) => this.toggleViewMode(e.target.checked);
-        controlsGroup.appendChild(viewModeToggle);
-
-        toolbar.appendChild(controlsGroup);
+        viewModeToggle.querySelector('input').onchange = (e) => {
+            viewModeToggle.classList.toggle('active', e.target.checked);
+            this.toggleViewMode(e.target.checked);
+        };
+        toolbar.appendChild(viewModeToggle);
 
         return toolbar;
     }
@@ -249,6 +275,9 @@ class ModularPromptModule {
             // 内容编辑区
             const contentEl = document.createElement('div');
             contentEl.className = 'block-content';
+            contentEl.spellcheck = false;
+            contentEl.setAttribute('autocorrect', 'off');
+            contentEl.setAttribute('autocapitalize', 'off');
             contentEl.contentEditable = false; // 默认不可编辑
             // 如果有自定义名称，显示名称；否则显示内容
             const displayText = block.name && block.name.trim() ? block.name : currentContent;
@@ -272,7 +301,18 @@ class ModularPromptModule {
                 }
             });
             
+            const contextVersion = this.contextVersion;
+            contentEl.addEventListener('input', () => {
+                if (contextVersion !== this.contextVersion || !this.blocks.includes(block)) return;
+                if (block.variants && block.variants.length > 0) {
+                    block.variants[block.selectedVariant || 0] = contentEl.textContent;
+                } else {
+                    block.content = contentEl.textContent;
+                }
+                this.save();
+            });
             contentEl.addEventListener('blur', () => {
+                if (contextVersion !== this.contextVersion || !this.blocks.includes(block)) return;
                 // 退出编辑模式
                 contentEl.contentEditable = false;
                 // 更新当前选中的内容条目
@@ -392,6 +432,10 @@ class ModularPromptModule {
                 hidden: block.type === 'newline'
             },
             {
+                label: '复制到小仓',
+                action: () => this.copyBlockToWarehouse(index)
+            },
+            {
                 label: '移到小仓',
                 action: () => this.moveBlockToWarehouse(index)
             },
@@ -471,7 +515,7 @@ class ModularPromptModule {
         block.variants.forEach((variant, idx) => {
             dialogHTML += `
                         <div class="variant-item-edit" data-index="${idx}">
-                            <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
+                            <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
                             ${block.variants.length > 1 ? `<button class="remove-variant-btn" data-index="${idx}">×</button>` : ''}
                         </div>`;
         });
@@ -503,7 +547,7 @@ class ModularPromptModule {
             variantItem.className = 'variant-item-edit';
             variantItem.dataset.index = newIndex;
             variantItem.innerHTML = `
-                <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${newIndex + 1}"></textarea>
+                <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${newIndex + 1}"></textarea>
                 <button class="remove-variant-btn" data-index="${newIndex}">×</button>
             `;
             variantsList.appendChild(variantItem);
@@ -598,6 +642,30 @@ class ModularPromptModule {
     }
 
     /**
+     * 复制积木块到当前选中的小仓（检查重复）
+     */
+    copyBlockToWarehouse(index) {
+        const block = this.blocks[index];
+        if (!block) return;
+
+        if (!this.hiddenBlocks[this.currentWarehouse]) {
+            this.hiddenBlocks[this.currentWarehouse] = [];
+        }
+
+        const isDuplicate = this.hiddenBlocks[this.currentWarehouse].some(hiddenBlock => {
+            return this.areBlocksEqual(hiddenBlock, block);
+        });
+        if (isDuplicate) return;
+
+        const copiedBlock = structuredClone(block);
+        copiedBlock.id = this.generateId();
+        this.hiddenBlocks[this.currentWarehouse].push(copiedBlock);
+
+        this.save();
+        this.renderWarehouse();
+    }
+
+    /**
      * 移动积木块到小仓（检查重复）
      */
     moveBlockToWarehouse(index) {
@@ -657,21 +725,7 @@ class ModularPromptModule {
     renderWarehouse() {
         this.warehouseContainer.innerHTML = '';
 
-        const header = document.createElement('div');
-        header.className = 'warehouse-header';
-        header.innerHTML = '<h4>隐藏积木块小仓</h4>';
-        
-        // 添加新建仓库按钮
-        const addWarehouseBtn = document.createElement('button');
-        addWarehouseBtn.className = 'add-warehouse-btn';
-        addWarehouseBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>新建小仓</span>';
-        addWarehouseBtn.title = '新建仓库';
-        addWarehouseBtn.onclick = () => this.createWarehouse();
-        header.appendChild(addWarehouseBtn);
-        
-        this.warehouseContainer.appendChild(header);
-
-        // 仓库选择
+        // 仓库选择与新建
         const warehouseSelector = document.createElement('div');
         warehouseSelector.className = 'warehouse-selector';
         
@@ -689,6 +743,7 @@ class ModularPromptModule {
             
             // 仓库名称按钮
             const btn = document.createElement('button');
+            btn.type = 'button';
             btn.className = 'warehouse-btn';
             // [修改] 为 global 仓库添加图标
             if (name === 'global') {
@@ -723,6 +778,16 @@ class ModularPromptModule {
             
             warehouseSelector.appendChild(warehouseItem);
         });
+
+        // 添加新建仓库圆形按钮（加号圆形图标，与仓库 pill 并列）
+        const addWarehouseBtn = document.createElement('button');
+        addWarehouseBtn.type = 'button';
+        addWarehouseBtn.className = 'add-warehouse-btn';
+        addWarehouseBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
+        addWarehouseBtn.title = '新建仓库';
+        addWarehouseBtn.setAttribute('aria-label', '新建仓库');
+        addWarehouseBtn.onclick = () => this.createWarehouse();
+        warehouseSelector.appendChild(addWarehouseBtn);
 
         this.warehouseContainer.appendChild(warehouseSelector);
 
@@ -869,6 +934,10 @@ class ModularPromptModule {
                 action: () => this.editHiddenBlock(block, index)
             },
             {
+                label: '复制到编辑区',
+                action: () => this.copyBlockToEditor(index)
+            },
+            {
                 label: '恢复到编辑区',
                 action: () => this.restoreBlock(index)
             },
@@ -935,7 +1004,7 @@ class ModularPromptModule {
         block.variants.forEach((variant, idx) => {
             dialogHTML += `
                         <div class="variant-item-edit" data-index="${idx}">
-                            <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
+                            <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
                             ${block.variants.length > 1 ? `<button class="remove-variant-btn" data-index="${idx}">×</button>` : ''}
                         </div>`;
         });
@@ -967,7 +1036,7 @@ class ModularPromptModule {
             variantItem.className = 'variant-item-edit';
             variantItem.dataset.index = newIndex;
             variantItem.innerHTML = `
-                <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${newIndex + 1}"></textarea>
+                <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${newIndex + 1}"></textarea>
                 <button class="remove-variant-btn" data-index="${newIndex}">×</button>
             `;
             variantsList.appendChild(variantItem);
@@ -1023,6 +1092,21 @@ class ModularPromptModule {
         dialog.querySelector('.dialog-overlay').onclick = closeDialog;
 
         nameInput.focus();
+    }
+
+    /**
+     * 复制当前小仓中的积木块到编辑区
+     */
+    copyBlockToEditor(index) {
+        const block = this.hiddenBlocks[this.currentWarehouse]?.[index];
+        if (!block) return;
+
+        const copiedBlock = structuredClone(block);
+        copiedBlock.id = this.generateId();
+        this.blocks.push(copiedBlock);
+
+        this.save();
+        this.renderBlocks();
     }
 
     /**
@@ -1215,7 +1299,7 @@ class ModularPromptModule {
                     // 如果有轮换文本，使用选中的版本
                     if (block.variants && block.variants.length > 0) {
                         const selectedIndex = block.selectedVariant || 0;
-                        content = block.variants[selectedIndex] || content;
+                        content = block.variants[selectedIndex] ?? content;
                     }
                     return content;
                 }
@@ -1275,29 +1359,20 @@ class ModularPromptModule {
      * [修改后] 保存数据（分流保存私有和全局数据）
      */
     async save() {
-        // 在第一个 await 前冻结目标和数据。否则保存全局仓库期间切换 Agent 后，
-        // this.agentId/this.blocks 可能已经指向新 Agent，造成跨 Agent 覆盖。
-        const targetAgentId = this.agentId;
-        if (!targetAgentId) return;
+        // 仅标记草稿变更；Agent 配置由保存按钮统一提交。
+        this.container?.dispatchEvent(new CustomEvent('input', { bubbles: true }));
+        return Boolean(this.agentId);
+    }
 
-        const globalBlocksToSave = structuredClone(this.hiddenBlocks['global'] || []);
-        const privateDataToSave = {
+    getDraft() {
+        const hiddenBlocks = structuredClone(this.hiddenBlocks);
+        delete hiddenBlocks.global;
+        return {
             blocks: structuredClone(this.blocks),
-            hiddenBlocks: structuredClone(this.hiddenBlocks),
+            hiddenBlocks,
             warehouseOrder: [...this.warehouseOrder],
-            viewMode: this.viewMode
+            viewMode: this.viewMode,
         };
-        delete privateDataToSave.hiddenBlocks['global'];
-
-        try {
-            await this.electronAPI.saveGlobalWarehouse(globalBlocksToSave);
-        } catch (error) {
-            console.error('Error saving global warehouse:', error);
-        }
-
-        await this.electronAPI.updateAgentConfig(targetAgentId, {
-            advancedSystemPrompt: privateDataToSave
-        });
     }
     
     /**

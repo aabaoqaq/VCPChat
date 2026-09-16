@@ -1,117 +1,4 @@
-/* --- Model Selection Styles --- */
-
-.model-input-container {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    /* Add gap between select and button */
-}
-
-#agentModel,
-#agentSettingsForm select {
-    /* Apply flex-grow to select elements inside the form */
-    flex-grow: 1;
-    /* Allow select to take up available space */
-}
-
-#agentSettingsForm .model-input-container button,
-#globalSettingsForm .model-input-container button,
-#groupSettingsForm .model-input-container button {
-    /* 新增群组设置按钮样式 */
-    flex-shrink: 0;
-    /* Prevent button from shrinking */
-    margin-left: 0;
-    /* Gap property handles spacing */
-    /* Let's borrow styles from #refreshModelsBtn for consistency */
-    padding: 0;
-    background-color: var(--button-bg);
-    border: 1px solid var(--button-bg);
-    color: var(--text-on-accent);
-    border-radius: 6px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background-color 0.2s ease, border-color 0.2s ease;
-    box-sizing: border-box;
-    height: 38px;
-    /* Match the typical height of inputs */
-    width: 38px;
-}
-
-#agentSettingsForm .model-input-container button:hover,
-#globalSettingsForm .model-input-container button:hover,
-#groupSettingsForm .model-input-container button:hover {
-    /* 新增群组设置按钮悬停样式 */
-    background-color: var(--button-hover-bg);
-    border-color: var(--button-hover-bg);
-}
-
-#agentSettingsForm .model-input-container button svg,
-#globalSettingsForm .model-input-container button svg,
-#groupSettingsForm .model-input-container button svg {
-    /* 新增群组设置按钮SVG样式 */
-    stroke: currentColor;
-    transition: transform 0.5s ease;
-}
-
-#agentSettingsForm .model-input-container button:active svg,
-#globalSettingsForm .model-input-container button:active svg,
-#groupSettingsForm .model-input-container button:active svg {
-    /* 新增群组设置按钮激活样式 */
-    transform: rotate(360deg);
-}
-
-#globalSettingsForm .model-input-container #openTopicSummaryModelSelectBtn {
-    position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    right: 5px;
-}
-
-#agentModel {
-    padding-right: 35px;
-    /* Make space for the button */
-}
-
-#agentSettingsForm .model-input-container #openModelSelectBtn,
-#globalSettingsForm .model-input-container #openTopicSummaryModelSelectBtn,
-#groupSettingsForm .model-input-container #openGroupModelSelectBtn {
-    position: absolute;
-    right: 5px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 24px;
-    height: 24px;
-    padding: 2px;
-    border: none;
-    background-color: transparent;
-    cursor: pointer;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background-color 0.2s ease, transform 0.2s ease;
-    flex-shrink: 0;
-    min-width: 24px;
-    z-index: 2;
-    color: var(--secondary-text);
-}
-
-#openModelSelectBtn:hover,
-#openTopicSummaryModelSelectBtn:hover,
-#openGroupModelSelectBtn:hover {
-    background-color: var(--accent-bg);
-}
-
-#openModelSelectBtn svg,
-#openTopicSummaryModelSelectBtn svg,
-#openGroupModelSelectBtn svg {
-    stroke: var(--secondary-text);
-    width: 14px;
-    height: 14px;
-}
+/* --- Model Selection Modal Styles --- */
 
 .model-search-container {
     display: flex;
@@ -138,17 +25,14 @@
     border: 1px solid var(--button-bg);
     color: var(--text-on-accent);
     border-radius: 6px;
-    /* Match search input border-radius */
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background-color 0.2s ease, border-color 0.2s ease;
+    transition: background-color var(--vcp-motion-duration-normal) var(--vcp-motion-ease-standard), border-color var(--vcp-motion-duration-normal) var(--vcp-motion-ease-standard);
     box-sizing: border-box;
     height: 36px;
     width: 36px;
-    position: relative;
-    top: -7.5px;
 }
 
 #refreshModelsBtn:hover {
@@ -158,7 +42,7 @@
 
 #refreshModelsBtn svg {
     stroke: currentColor;
-    transition: transform 0.5s ease;
+    transition: transform var(--vcp-motion-duration-slow) var(--vcp-motion-ease-standard);
 }
 
 #refreshModelsBtn:active svg {
@@ -176,13 +60,17 @@
 }
 
 .model-list li {
+    position: relative;
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) 24px;
+    align-items: center;
+    column-gap: 8px;
+    min-width: 0;
     padding: 10px 15px;
+    box-sizing: border-box;
     cursor: pointer;
     border-bottom: 1px solid var(--border-color);
-    transition: background-color 0.2s ease;
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    transition: background-color var(--vcp-motion-duration-normal) var(--vcp-motion-ease-standard);
 }
 
 .model-list li:last-child {
@@ -208,7 +96,6 @@
     border-bottom: 1px solid var(--border-color);
     pointer-events: none;
     display: block;
-    /* Override flex for title */
 }
 
 .model-list li.model-section-title:hover {
@@ -221,26 +108,28 @@
 }
 
 .hot-model-badge {
+    grid-column: 1;
+    justify-self: center;
     font-size: 0.85em;
-    flex-shrink: 0;
-    animation: flame-pulse 1.5s ease-in-out infinite;
+    line-height: 1;
+    animation: flame-pulse 1.5s var(--vcp-motion-ease-standard) infinite;
 }
 
 .model-name-text {
-    flex-grow: 1;
+    grid-column: 2;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    line-height: 20px;
 }
 
 @keyframes flame-pulse {
-
     0%,
     100% {
         opacity: 1;
         transform: scale(1);
     }
-
     50% {
         opacity: 0.7;
         transform: scale(1.15);
@@ -249,16 +138,21 @@
 
 /* --- Favorite Star Styles --- */
 .model-favorite-star {
+    grid-column: 3;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 4px;
-    margin-left: auto;
-    /* Push to the right edge */
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    margin: 0;
+    box-sizing: border-box;
     color: var(--secondary-text);
     cursor: pointer;
     border-radius: 4px;
-    transition: all 0.2s ease;
+    transition: opacity var(--vcp-motion-duration-normal) var(--vcp-motion-ease-standard),
+                color var(--vcp-motion-duration-normal) var(--vcp-motion-ease-standard),
+                background-color var(--vcp-motion-duration-normal) var(--vcp-motion-ease-standard);
     opacity: 0.6;
 }
 
@@ -277,4 +171,3 @@
     color: #ffc107;
     background-color: rgba(255, 193, 7, 0.1);
 }
-

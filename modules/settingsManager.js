@@ -1,6 +1,6 @@
 /**
  * settingsManager.js
- * 
+ *
  * Manages the settings panel for both Agents and Groups.
  * Handles displaying, populating, saving, and deleting items.
  */
@@ -55,15 +55,12 @@ const settingsManager = (() => {
     let agentContextTokenLimitInput, agentMaxOutputTokensInput, agentTopPInput, agentTopKInput;
     let agentAvatarBorderColorInput, agentAvatarBorderColorTextInput;
     let agentNameTextColorInput, agentNameTextColorTextInput;
-    let agentCustomCssInput;
+    let agentCustomCssInput, resetAvatarColorsBtn;
     let promptManager = null; // PromptManager instance
     let openModelSelectBtn, modelSelectModal, modelList, modelSearchInput, refreshModelsBtn;
     let topicSummaryModelInput, openTopicSummaryModelSelectBtn; // New elements for topic summary model
-    let agentTtsVoicePrimarySelect, agentTtsRegexPrimaryInput, agentTtsVoiceSecondarySelect, agentTtsRegexSecondaryInput, refreshTtsModelsBtn, agentTtsSpeedSlider, ttsSpeedValueSpan;
-    let agentTtsDirectorPromptInput, addAgentTtsDirectorPromptBtn, fillAgentTtsDirectorTemplateBtn, agentTtsDirectorPromptsContainer;
+    let agentTtsVoicePrimarySelect, agentTtsRegexPrimaryInput, agentTtsVoiceSecondarySelect, agentTtsRegexSecondaryInput, refreshTtsModelsBtn, agentTtsSpeedSlider;
     let currentAgentTtsDirectorPrompts = [];
-    let agentTtsPrimarySelectController = null;
-    let agentTtsSecondarySelectController = null;
     const TTS_DIRECTOR_TEMPLATE = `【角色】
 写清人物的身份、年龄、性格底色、外形气质与说话习惯。
 
@@ -95,6 +92,9 @@ const settingsManager = (() => {
     let scheduleStickyButtonsRefresh = () => { };
     let agentSettingsPopulateToken = 0;
     let agentSettingsPopulateQueue = Promise.resolve();
+    let isAgentSettingsDirty = false;
+    let agentSettingsRevision = 0;
+    let agentSettingsAutosaveTimer = null;
     const initializedCollapseStateAgents = new Set();
     const promptModeFallbackLabels = {
         original: '文本',
@@ -102,13 +102,64 @@ const settingsManager = (() => {
         preset: '预置'
     };
 
-    function syncRangeProgress(rangeInput) {
-        if (!rangeInput) return;
-        const min = Number(rangeInput.min || 0);
-        const max = Number(rangeInput.max || 100);
-        const value = Number(rangeInput.value || min);
-        const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
-        rangeInput.style.setProperty('--vcp-ui-range-progress', `${Math.max(0, Math.min(100, progress))}%`);
+    function resolveAgentForm() {
+        if (agentSettingsForm && (agentSettingsForm.isConnected || !document.contains(agentSettingsForm))) {
+            const surfaceHost = window.VCPSettingsSidebar?.getView?.('agent');
+            if (surfaceHost && (surfaceHost === agentSettingsForm || surfaceHost.contains(agentSettingsForm))) {
+                return agentSettingsForm;
+            }
+        }
+        const surfaceHost = window.VCPSettingsSidebar?.getView?.('agent') || document.getElementById('agentSettingsContainer');
+        const form = surfaceHost?.querySelector?.('#agentSettingsForm') || document.getElementById('agentSettingsForm');
+        if (form) agentSettingsForm = form;
+        return agentSettingsForm;
+    }
+
+    function getAgentControl(id) {
+        if (!id) return null;
+        const form = resolveAgentForm();
+        let el = form?.querySelector?.(`#${id}`) || document.getElementById(id);
+        if (!el) {
+            if (id === 'agentModelInput') el = form?.querySelector?.('#agentModel') || document.getElementById('agentModel');
+            else if (id === 'agentModel') el = form?.querySelector?.('#agentModelInput') || document.getElementById('agentModelInput');
+            else if (id.endsWith('Input')) {
+                const altId = id.slice(0, -5);
+                el = form?.querySelector?.(`#${altId}`) || document.getElementById(altId);
+            } else {
+                const altId = `${id}Input`;
+                el = form?.querySelector?.(`#${altId}`) || document.getElementById(altId);
+            }
+        }
+        return el || null;
+    }
+
+    function refreshAgentControls() {
+        agentSettingsForm = resolveAgentForm();
+        editingAgentIdInput = getAgentControl('editingAgentId') || editingAgentIdInput;
+        agentNameInput = getAgentControl('agentNameInput') || getAgentControl('agentName') || agentNameInput;
+        agentAvatarInput = getAgentControl('agentAvatarInput') || getAgentControl('agentAvatar') || agentAvatarInput;
+        agentAvatarPreview = getAgentControl('agentAvatarPreview') || agentAvatarPreview;
+        agentModelInput = getAgentControl('agentModel') || getAgentControl('agentModelInput') || agentModelInput;
+        agentTemperatureInput = getAgentControl('agentTemperature') || agentTemperatureInput;
+        agentContextTokenLimitInput = getAgentControl('agentContextTokenLimit') || agentContextTokenLimitInput;
+        agentMaxOutputTokensInput = getAgentControl('agentMaxOutputTokens') || agentMaxOutputTokensInput;
+        agentTopPInput = getAgentControl('agentTopP') || agentTopPInput;
+        agentTopKInput = getAgentControl('agentTopK') || agentTopKInput;
+
+        agentAvatarBorderColorInput = getAgentControl('agentAvatarBorderColor') || agentAvatarBorderColorInput;
+        agentAvatarBorderColorTextInput = getAgentControl('agentAvatarBorderColorText') || agentAvatarBorderColorTextInput;
+        agentNameTextColorInput = getAgentControl('agentNameTextColor') || agentNameTextColorInput;
+        agentNameTextColorTextInput = getAgentControl('agentNameTextColorText') || agentNameTextColorTextInput;
+        agentCustomCssInput = getAgentControl('agentCustomCss') || agentCustomCssInput;
+        resetAvatarColorsBtn = getAgentControl('resetAvatarColorsBtn') || resetAvatarColorsBtn;
+        openModelSelectBtn = getAgentControl('openModelSelectBtn') || openModelSelectBtn;
+
+        agentTtsVoicePrimarySelect = getAgentControl('agentTtsVoicePrimary') || agentTtsVoicePrimarySelect;
+        agentTtsRegexPrimaryInput = getAgentControl('agentTtsRegexPrimary') || agentTtsRegexPrimaryInput;
+        agentTtsVoiceSecondarySelect = getAgentControl('agentTtsVoiceSecondary') || agentTtsVoiceSecondarySelect;
+        agentTtsRegexSecondaryInput = getAgentControl('agentTtsRegexSecondary') || agentTtsRegexSecondaryInput;
+        refreshTtsModelsBtn = getAgentControl('refreshTtsModelsBtn') || refreshTtsModelsBtn;
+        agentTtsSpeedSlider = getAgentControl('agentTtsSpeed') || agentTtsSpeedSlider;
     }
 
     function reportSettingsSaveResult(form, success, error = '') {
@@ -123,43 +174,71 @@ const settingsManager = (() => {
         }));
     }
 
+    let settingsDisplayToken = 0;
+
     /**
      * Displays the appropriate settings view (agent, group, or default prompt)
      * based on the currently selected item.
      */
-    async function displaySettingsForItem() {
-        const currentSelectedItem = refs.currentSelectedItemRef.get();
+    async function displaySettingsForItem(item = null, type = 'agent') {
+        const displayToken = ++settingsDisplayToken;
+        let currentSelectedItem;
+        if (typeof item === 'string') {
+            const refItem = refs.currentSelectedItemRef?.get?.();
+            if (refItem && refItem.id === item) {
+                currentSelectedItem = refItem;
+            } else {
+                currentSelectedItem = { id: item, type: type || 'agent' };
+            }
+        } else if (item && typeof item === 'object') {
+            currentSelectedItem = item;
+        } else {
+            currentSelectedItem = refs.currentSelectedItemRef?.get?.() || {};
+        }
+
+        const settingsSurface = window.VCPSettingsSidebar;
 
         const agentSettingsExists = agentSettingsContainer && typeof agentSettingsContainer.style !== 'undefined';
         const groupSettingsExists = groupSettingsContainer && typeof groupSettingsContainer.style !== 'undefined';
 
         if (currentSelectedItem.id) {
-            selectItemPromptForSettings.style.display = 'none';
-            selectedItemNameForSettingsSpan.textContent = currentSelectedItem.name || currentSelectedItem.id;
+            if (!currentSelectedItem.type) {
+                currentSelectedItem.type = type || 'agent';
+            }
+            if (selectedItemNameForSettingsSpan) {
+                selectedItemNameForSettingsSpan.textContent = currentSelectedItem.name || currentSelectedItem.id;
+            }
 
             if (currentSelectedItem.type === 'agent') {
-                if (agentSettingsExists) agentSettingsContainer.style.display = '';
-                if (groupSettingsExists) groupSettingsContainer.style.display = 'none';
-                itemSettingsContainerTitle.textContent = 'Agent 设置: ';
-                deleteItemBtn.textContent = '删除此 Agent';
-                await populateAgentSettingsForm(currentSelectedItem.id, (currentSelectedItem.config || currentSelectedItem));
+                if (!currentSelectedItem.config && electronAPI?.getAgentConfig) {
+                    try {
+                        currentSelectedItem.config = await electronAPI.getAgentConfig(currentSelectedItem.id);
+                    } catch (err) {
+                        console.warn(`[SettingsManager] Failed to fetch agent config for ${currentSelectedItem.id}:`, err);
+                    }
+                }
+                const viewToken = settingsSurface?.show?.('agent', { id: currentSelectedItem.id });
+                if (itemSettingsContainerTitle) itemSettingsContainerTitle.textContent = 'Agent 设置: ';
+                if (deleteItemBtn) deleteItemBtn.textContent = '删除此 Agent';
+                await populateAgentSettingsForm(currentSelectedItem.id, (currentSelectedItem.config || currentSelectedItem), viewToken);
             } else if (currentSelectedItem.type === 'group') {
-                if (agentSettingsExists) agentSettingsContainer.style.display = 'none';
-                if (groupSettingsExists) groupSettingsContainer.style.display = 'block';
-                itemSettingsContainerTitle.textContent = '群组设置: ';
-                deleteItemBtn.textContent = '删除此群组';
+                settingsSurface?.show?.('group', { id: currentSelectedItem.id });
+                if (itemSettingsContainerTitle) itemSettingsContainerTitle.textContent = '群组设置: ';
+                if (deleteItemBtn) deleteItemBtn.textContent = '删除此群组';
                 if (window.GroupRenderer && typeof window.GroupRenderer.displayGroupSettingsPage === 'function') {
-                    window.GroupRenderer.displayGroupSettingsPage(currentSelectedItem.id);
+                    await window.GroupRenderer.displayGroupSettingsPage(currentSelectedItem.id);
                 } else {
                     console.error("GroupRenderer or displayGroupSettingsPage not available.");
                     if (groupSettingsExists) groupSettingsContainer.innerHTML = "<p>无法加载群组设置界面。</p>";
                 }
             }
+            if (displayToken !== settingsDisplayToken) {
+                console.debug(`[SettingsManager] Stale displaySettingsForItem completed for item ${currentSelectedItem.id}, discarded.`);
+                return;
+            }
         } else {
-            if (agentSettingsExists) agentSettingsContainer.style.display = 'none';
-            if (groupSettingsExists) groupSettingsContainer.style.display = 'none';
+            settingsSurface?.show?.('prompt', { message: '请先在左侧选择一个 Agent 或群组以查看或修改其设置。' });
             selectItemPromptForSettings.textContent = '请先在左侧选择一个 Agent 或群组以查看或修改其设置。';
-            selectItemPromptForSettings.style.display = 'block';
             itemSettingsContainerTitle.textContent = '设置';
             selectedItemNameForSettingsSpan.textContent = '';
         }
@@ -170,16 +249,14 @@ const settingsManager = (() => {
      * @param {string} agentId - The ID of the agent.
      * @param {object} agentConfig - The configuration object for the agent.
      */
-    function populateAgentSettingsForm(agentId, agentConfig) {
+    function populateAgentSettingsForm(agentId, agentConfig, viewToken = null) {
         const populateToken = ++agentSettingsPopulateToken;
 
         // 新增提示词编辑器只是尚未提交到列表的临时草稿，不属于 Agent 配置。
         // 表单 DOM 会被所有 Agent 复用，因此切换 Agent 时必须立即清空，否则 A 的
         // 草稿会继续显示在 B 的设置中，并可能被误添加、误保存到 B。
-        if (agentTtsDirectorPromptInput && editingAgentIdInput?.value !== agentId) {
-            agentTtsDirectorPromptInput.value = '';
-            agentTtsDirectorPromptInput.closest('.tts-director-composer')?.classList.remove('is-editing');
-            resizeTtsDirectorEditor(agentTtsDirectorPromptInput, false);
+        if (editingAgentIdInput?.value !== agentId) {
+            window.VCPSettingsSlots?.mimoDirector?.clearDraft?.();
         }
 
         // 所有 Agent 共用同一套表单和 PromptManager。串行切换上下文，并让较新的请求淘汰
@@ -190,19 +267,27 @@ const settingsManager = (() => {
                 return { stale: true };
             }
 
-            if (groupSettingsContainer) groupSettingsContainer.style.display = 'none';
-            if (agentSettingsContainer) agentSettingsContainer.style.display = '';
+            if (viewToken && !window.VCPSettingsSidebar?.isCurrent?.(viewToken)) {
+                return { stale: true };
+            }
 
             if (!agentConfig || agentConfig.error) {
                 uiHelper.showToastNotification(`加载Agent配置失败: ${agentConfig?.error || '未知错误'}`, 'error');
-                if (agentSettingsContainer) agentSettingsContainer.style.display = 'none';
+                window.VCPSettingsSidebar?.show?.('prompt', { message: `加载 ${agentId} 配置失败。` });
                 selectItemPromptForSettings.textContent = `加载 ${agentId} 配置失败。`;
-                selectItemPromptForSettings.style.display = 'block';
                 return;
             }
 
+            // Quiescent Unmount discipline: commit active input value before switching agent context
+            const activeEl = document.activeElement;
+            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA') && activeEl.closest('#agentSettingsForm')) {
+                try { activeEl.blur(); } catch (_) {}
+            }
+
+            // 加载/切换只读，禁止通过保存旧表单来完成上下文交接。
+
             // Initialize PromptManager (Singleton Pattern)
-            const systemPromptContainer = document.getElementById('systemPromptContainer');
+            const systemPromptContainer = getAgentControl('systemPromptContainer');
             if (systemPromptContainer && window.PromptManager) {
                 if (!promptManager) {
                     promptManager = new window.PromptManager();
@@ -210,9 +295,6 @@ const settingsManager = (() => {
                         containerElement: systemPromptContainer,
                         electronAPI: electronAPI
                     });
-                } else if (promptManager.getAgentId?.()) {
-                    // 保存的目标由 PromptManager 自身上下文决定，而不是可变的表单 ID。
-                    await promptManager.saveCurrentModeData();
                 }
 
                 if (populateToken !== agentSettingsPopulateToken) {
@@ -228,58 +310,90 @@ const settingsManager = (() => {
                 return { stale: true };
             }
 
-            // 只有提示词上下文已成功切到目标 Agent 后，才发布表单所代表的 Agent ID。
-            editingAgentIdInput.value = agentId;
-            agentNameInput.value = agentConfig.name || agentId;
+            if (viewToken && !window.VCPSettingsSidebar?.isCurrent?.(viewToken)) {
+                return { stale: true };
+            }
 
-            agentModelInput.value = agentConfig.model || '';
-        agentTemperatureInput.value = agentConfig.temperature === null ? '' : (agentConfig.temperature !== undefined ? agentConfig.temperature : 0.7);
-        agentContextTokenLimitInput.value = agentConfig.contextTokenLimit === null ? '' : (agentConfig.contextTokenLimit !== undefined ? agentConfig.contextTokenLimit : 4000);
-        agentMaxOutputTokensInput.value = agentConfig.maxOutputTokens === null ? '' : (agentConfig.maxOutputTokens !== undefined ? agentConfig.maxOutputTokens : 1000);
-        agentTopPInput.value = agentConfig.top_p === null ? '' : (agentConfig.top_p !== undefined ? agentConfig.top_p : '');
-        agentTopKInput.value = agentConfig.top_k === null ? '' : (agentConfig.top_k !== undefined ? agentConfig.top_k : '');
+        refreshAgentControls();
+
+        if (editingAgentIdInput) editingAgentIdInput.value = agentId;
+        if (agentNameInput) agentNameInput.value = agentConfig.name || agentId;
+
+        if (agentModelInput) agentModelInput.value = agentConfig.model || '';
+        if (agentTemperatureInput) agentTemperatureInput.value = agentConfig.temperature === null ? '' : (agentConfig.temperature !== undefined ? agentConfig.temperature : 0.7);
+        if (agentContextTokenLimitInput) agentContextTokenLimitInput.value = agentConfig.contextTokenLimit === null ? '' : (agentConfig.contextTokenLimit !== undefined ? agentConfig.contextTokenLimit : 4000);
+        if (agentMaxOutputTokensInput) agentMaxOutputTokensInput.value = agentConfig.maxOutputTokens === null ? '' : (agentConfig.maxOutputTokens !== undefined ? agentConfig.maxOutputTokens : 1000);
+        if (agentTopPInput) agentTopPInput.value = agentConfig.top_p === null ? '' : (agentConfig.top_p !== undefined ? agentConfig.top_p : '');
+        if (agentTopKInput) agentTopKInput.value = agentConfig.top_k === null ? '' : (agentConfig.top_k !== undefined ? agentConfig.top_k : '');
 
         const streamOutput = agentConfig.streamOutput !== undefined ? agentConfig.streamOutput : true;
-        document.getElementById('agentStreamOutputTrue').checked = streamOutput === true || String(streamOutput) === 'true';
-        document.getElementById('agentStreamOutputFalse').checked = streamOutput === false || String(streamOutput) === 'false';
+        const streamOutputTrue = getAgentControl('agentStreamOutputTrue');
+        const streamOutputFalse = getAgentControl('agentStreamOutputFalse');
+        if (streamOutputTrue) streamOutputTrue.checked = streamOutput === true || String(streamOutput) === 'true';
+        if (streamOutputFalse) streamOutputFalse.checked = streamOutput === false || String(streamOutput) === 'false';
 
         // 获取头像包装器元素
         const avatarWrapper = agentAvatarPreview?.closest('.agent-avatar-wrapper');
 
-        if (agentConfig.avatarUrl) {
-            agentAvatarPreview.src = `${agentConfig.avatarUrl}${agentConfig.avatarUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
-            agentAvatarPreview.style.display = 'block';
-            // 有头像时移除 no-avatar 类
-            if (avatarWrapper) {
-                avatarWrapper.classList.remove('no-avatar');
-            }
-        } else {
-            // 头像为空时显示默认头像，不进行颜色提取
-            agentAvatarPreview.src = 'assets/default_avatar.png';
-            agentAvatarPreview.style.display = 'block';
-            // 无头像时添加 no-avatar 类，确保相机图标始终显示
-            if (avatarWrapper) {
-                avatarWrapper.classList.add('no-avatar');
+        if (agentAvatarPreview) {
+            if (agentConfig.avatarUrl) {
+                agentAvatarPreview.src = `${agentConfig.avatarUrl}${agentConfig.avatarUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
+                agentAvatarPreview.hidden = false;
+                // 有头像时移除 no-avatar 类
+                if (avatarWrapper) {
+                    avatarWrapper.classList.remove('no-avatar');
+                }
+            } else {
+                // 头像为空时显示默认头像，不进行颜色提取
+                agentAvatarPreview.src = 'assets/default_avatar.png';
+                agentAvatarPreview.hidden = false;
+                // 无头像时添加 no-avatar 类，确保相机图标始终显示
+                if (avatarWrapper) {
+                    avatarWrapper.classList.add('no-avatar');
+                }
             }
         }
-        agentAvatarInput.value = '';
-        mainRendererFunctions.setCroppedFile('agent', null);
+        if (agentAvatarInput) agentAvatarInput.value = '';
+        if (mainRendererFunctions.setCroppedFile) {
+            mainRendererFunctions.setCroppedFile('agent', null);
+        }
 
-        // Populate custom style settings
-        agentAvatarBorderColorInput.value = agentConfig.avatarBorderColor || '#3d5a80';
-        agentAvatarBorderColorTextInput.value = agentConfig.avatarBorderColor || '#3d5a80';
-        agentNameTextColorInput.value = agentConfig.nameTextColor || '#ffffff';
-        agentNameTextColorTextInput.value = agentConfig.nameTextColor || '#ffffff';
-        agentCustomCssInput.value = agentConfig.customCss || '';
+        // Populate custom style settings.  Programmatic populate writes must
+        // signal the mounted presentation primitives (vcp-uiux-sync, matching
+        // the settings-bridge set() contract) so mirrored displays — the TTS
+        // speed readout and the avatar preview border — converge on the newly
+        // selected Agent instead of keeping the previous one's values.
+        const signalPresentationSync = (node) => {
+            if (!node) return;
+            const EventCtor = node.ownerDocument?.defaultView?.CustomEvent ?? CustomEvent;
+            node.dispatchEvent(new EventCtor('vcp-uiux-sync', { bubbles: true }));
+        };
+        if (agentAvatarBorderColorInput) {
+            agentAvatarBorderColorInput.value = agentConfig.avatarBorderColor || '#3d5a80';
+            signalPresentationSync(agentAvatarBorderColorInput);
+        }
+        if (agentAvatarBorderColorTextInput) {
+            agentAvatarBorderColorTextInput.value = agentConfig.avatarBorderColor || '#3d5a80';
+        }
+        if (agentNameTextColorInput) {
+            agentNameTextColorInput.value = agentConfig.nameTextColor || '#ffffff';
+            signalPresentationSync(agentNameTextColorInput);
+        }
+        if (agentNameTextColorTextInput) {
+            agentNameTextColorTextInput.value = agentConfig.nameTextColor || '#ffffff';
+        }
+        if (agentCustomCssInput) {
+            agentCustomCssInput.value = agentConfig.customCss || '';
+        }
 
         // Load card CSS
-        const agentCardCssInput = document.getElementById('agentCardCss');
+        const agentCardCssInput = getAgentControl('agentCardCss');
         if (agentCardCssInput) {
             agentCardCssInput.value = agentConfig.cardCss || '';
         }
 
         // Load chat CSS
-        const agentChatCssInput = document.getElementById('agentChatCss');
+        const agentChatCssInput = getAgentControl('agentChatCss');
         if (agentChatCssInput) {
             agentChatCssInput.value = agentConfig.chatCss || '';
         }
@@ -288,13 +402,13 @@ const settingsManager = (() => {
         applyCardCssToIdentityContainer(agentConfig.cardCss || '');
 
         // Load disableCustomColors setting
-        const disableCustomColorsCheckbox = document.getElementById('disableCustomColors');
+        const disableCustomColorsCheckbox = getAgentControl('disableCustomColors');
         if (disableCustomColorsCheckbox) {
             disableCustomColorsCheckbox.checked = agentConfig.disableCustomColors || false;
         }
 
         // Load useThemeColorsInChat setting
-        const useThemeColorsInChatCheckbox = document.getElementById('useThemeColorsInChat');
+        const useThemeColorsInChatCheckbox = getAgentControl('useThemeColorsInChat');
         if (useThemeColorsInChatCheckbox) {
             useThemeColorsInChatCheckbox.checked = agentConfig.useThemeColorsInChat || false;
         }
@@ -302,23 +416,33 @@ const settingsManager = (() => {
         // Populate bilingual TTS settings
         await populateTtsModels(agentConfig.ttsVoicePrimary, agentConfig.ttsVoiceSecondary);
 
-        // 音色查询是异步边界。等待期间若用户切换到了其他 Agent，旧任务不能再把
-        // TTS 正则、导演提示词列表和其他共享状态写回当前表单。
+        // Voice lookup is asynchronous.  A newer Agent selection owns the
+        // shared form, so a stale lookup must not write prompts, regexes, or
+        // speed into the replacement Agent's canonical controls.
         if (populateToken !== agentSettingsPopulateToken) {
             console.debug(`[SettingsManager] Aborting stale TTS settings render for agent ${agentId}.`);
             return { stale: true };
         }
 
-        agentTtsRegexPrimaryInput.value = agentConfig.ttsRegexPrimary || '';
-        agentTtsRegexSecondaryInput.value = agentConfig.ttsRegexSecondary || '';
+        if (agentTtsRegexPrimaryInput) {
+            agentTtsRegexPrimaryInput.value = agentConfig.ttsRegexPrimary || '';
+        }
+        if (agentTtsRegexSecondaryInput) {
+            agentTtsRegexSecondaryInput.value = agentConfig.ttsRegexSecondary || '';
+        }
         currentAgentTtsDirectorPrompts = Array.isArray(agentConfig.ttsDirectorPrompts)
             ? agentConfig.ttsDirectorPrompts.map(item => String(item || '').trim()).filter(Boolean)
             : [];
-        renderTtsDirectorPrompts();
+        window.VCPSettingsSlots?.mimoDirector?.setPrompts?.(currentAgentTtsDirectorPrompts);
 
-        agentTtsSpeedSlider.value = agentConfig.ttsSpeed !== undefined ? agentConfig.ttsSpeed : 1.0;
-        ttsSpeedValueSpan.textContent = parseFloat(agentTtsSpeedSlider.value).toFixed(1);
-        syncRangeProgress(agentTtsSpeedSlider);
+        if (agentTtsSpeedSlider) {
+            agentTtsSpeedSlider.value = agentConfig.ttsSpeed !== undefined ? agentConfig.ttsSpeed : 1.0;
+            signalPresentationSync(agentTtsSpeedSlider);
+            const speedValueDisplay = getAgentControl('ttsSpeedValue');
+            if (speedValueDisplay) {
+                speedValueDisplay.textContent = Number(agentTtsSpeedSlider.value).toFixed(1);
+            }
+        }
 
         // Load and render regex rules
         currentAgentRegexes = JSON.parse(JSON.stringify(agentConfig.stripRegexes || [])); // Deep copy
@@ -328,6 +452,11 @@ const settingsManager = (() => {
             restoreCollapseStates(agentConfig);
             updateAllSectionSummaries();
             scheduleStickyButtonsRefresh();
+            isAgentSettingsDirty = false;
+            agentSettingsRevision = 0;
+            if (typeof globalThis.vcpUpdateFormStateDot === 'function') {
+                globalThis.vcpUpdateFormStateDot('done');
+            }
             document.dispatchEvent(new CustomEvent('vcp-settings-surface-updated', {
                 detail: { kind: 'agent', root: agentSettingsForm }
             }));
@@ -356,71 +485,75 @@ const settingsManager = (() => {
      * @param {Event} event - The form submission event.
      */
     async function saveCurrentAgentSettings(event) {
-        event.preventDefault();
-        const agentId = editingAgentIdInput.value;
+        if (event?.preventDefault) {
+            event.preventDefault();
+        }
+        refreshAgentControls();
+        const saveToken = agentSettingsPopulateToken;
+        const saveDisplayToken = settingsDisplayToken;
+        const isSaveContextCurrent = () =>
+            saveToken === agentSettingsPopulateToken && saveDisplayToken === settingsDisplayToken;
+        const saveButton = agentSettingsForm?.querySelector?.('button[type="submit"]') || null;
+        const agentId = editingAgentIdInput?.value;
         if (!agentId) {
             console.error("[SettingsManager] Cannot save agent settings: agentId is missing.");
             uiHelper.showToastNotification("保存失败：未指定 Agent ID", 'error');
             reportSettingsSaveResult(agentSettingsForm, false, 'missing-agent-id');
-            return;
+            return { success: false, error: 'missing-agent-id' };
         }
         if (promptManager?.getAgentId?.() && promptManager.getAgentId() !== agentId) {
             console.warn(`[SettingsManager] Blocked save for ${agentId}: PromptManager is bound to ${promptManager.getAgentId()}.`);
             uiHelper.showToastNotification('Agent 正在切换，请稍后再保存。', 'warning');
             reportSettingsSaveResult(agentSettingsForm, false, 'agent-switching');
-            return;
+            return { success: false, error: 'agent-switching' };
         }
 
-        // Get system prompt from PromptManager
+        // Prompt 子模块只维护草稿；统一保存时一次性收集快照。
         let systemPromptData = {};
         if (promptManager) {
-            await promptManager.saveCurrentModeData();
-            if (editingAgentIdInput.value !== agentId || promptManager.getAgentId?.() !== agentId) {
-                console.debug(`[SettingsManager] Aborting stale save after prompt persistence for ${agentId}.`);
+            systemPromptData = promptManager.collectDraft?.() || {};
+            if (editingAgentIdInput?.value !== agentId || promptManager.getAgentId?.() !== agentId) {
                 reportSettingsSaveResult(agentSettingsForm, false, 'stale-agent');
-                return;
+                return { success: false, error: 'stale-agent' };
             }
-
-            const currentPrompt = await promptManager.getCurrentSystemPrompt();
-            if (editingAgentIdInput.value !== agentId || promptManager.getAgentId?.() !== agentId) {
-                console.debug(`[SettingsManager] Aborting stale save after prompt read for ${agentId}.`);
-                reportSettingsSaveResult(agentSettingsForm, false, 'stale-agent');
-                return;
-            }
-            systemPromptData.systemPrompt = currentPrompt; // Keep for compatibility
         }
 
+        const currentConfig = refs.currentSelectedItemRef?.get?.()?.config;
+        const resolvedModelInput = getAgentControl('agentModel') || agentModelInput;
+        const resolvedModel = resolvedModelInput ? resolvedModelInput.value.trim() : (currentConfig?.model || 'gemini-pro');
+        const saveRevision = agentSettingsRevision;
+
         const newConfig = {
-            name: agentNameInput.value.trim(),
+            name: agentNameInput?.value?.trim?.() || (currentConfig ? currentConfig.name : agentId),
             ...systemPromptData,
-            model: agentModelInput.value.trim() || 'gemini-pro',
+            model: resolvedModel || 'gemini-pro',
             temperature: parseOptionalNumberInput(agentTemperatureInput, Number.parseFloat),
             contextTokenLimit: parseOptionalNumberInput(agentContextTokenLimitInput, value => Number.parseInt(value, 10)),
             maxOutputTokens: parseOptionalNumberInput(agentMaxOutputTokensInput, value => Number.parseInt(value, 10)),
             top_p: parseOptionalNumberInput(agentTopPInput, Number.parseFloat),
             top_k: parseOptionalNumberInput(agentTopKInput, value => Number.parseInt(value, 10)),
-            streamOutput: document.getElementById('agentStreamOutputTrue').checked,
-            ttsVoicePrimary: agentTtsVoicePrimarySelect.value,
-            ttsRegexPrimary: agentTtsRegexPrimaryInput.value.trim(),
-            ttsVoiceSecondary: agentTtsVoiceSecondarySelect.value,
-            ttsRegexSecondary: agentTtsRegexSecondaryInput.value.trim(),
+            streamOutput: getAgentControl('agentStreamOutputTrue')?.checked ?? true,
+            ttsVoicePrimary: agentTtsVoicePrimarySelect?.value || '',
+            ttsRegexPrimary: agentTtsRegexPrimaryInput?.value?.trim?.() || '',
+            ttsVoiceSecondary: agentTtsVoiceSecondarySelect?.value || '',
+            ttsRegexSecondary: agentTtsRegexSecondaryInput?.value?.trim?.() || '',
             ttsDirectorPrompts: [...currentAgentTtsDirectorPrompts],
-            ttsSpeed: parseFloat(agentTtsSpeedSlider.value),
-            stripRegexes: currentAgentRegexes,
-            avatarBorderColor: agentAvatarBorderColorInput.value,
-            nameTextColor: agentNameTextColorInput.value,
-            customCss: agentCustomCssInput.value.trim(),
-            cardCss: document.getElementById('agentCardCss')?.value.trim() || '',
-            chatCss: document.getElementById('agentChatCss')?.value.trim() || '',
-            disableCustomColors: document.getElementById('disableCustomColors')?.checked || false,
-            useThemeColorsInChat: document.getElementById('useThemeColorsInChat')?.checked || false,
+            ttsSpeed: parseFloat(agentTtsSpeedSlider?.value || 1),
+            stripRegexes: structuredClone(currentAgentRegexes),
+            avatarBorderColor: agentAvatarBorderColorInput?.value || '',
+            nameTextColor: agentNameTextColorInput?.value || '',
+            customCss: agentCustomCssInput?.value?.trim?.() || '',
+            cardCss: getAgentControl('agentCardCss')?.value?.trim?.() || '',
+            chatCss: getAgentControl('agentChatCss')?.value?.trim?.() || '',
+            disableCustomColors: getAgentControl('disableCustomColors')?.checked || false,
+            useThemeColorsInChat: getAgentControl('useThemeColorsInChat')?.checked || false,
             uiCollapseStates: getCurrentCollapseStates()
         };
 
         if (!newConfig.name) {
             uiHelper.showToastNotification("Agent名称不能为空！", 'error');
             reportSettingsSaveResult(agentSettingsForm, false, 'missing-name');
-            return;
+            return { success: false, error: 'missing-name' };
         }
 
         const croppedFile = mainRendererFunctions.getCroppedFile('agent');
@@ -437,7 +570,7 @@ const settingsManager = (() => {
                     uiHelper.showToastNotification(`保存Agent头像失败: ${avatarResult.error}`, 'error');
                     reportSettingsSaveResult(agentSettingsForm, false, avatarResult.error);
                     // 如果头像保存失败，视情况决定是否继续保存其他配置。这里选择报错并中断。
-                    return;
+                    return { success: false, error: avatarResult.error };
                 } else {
                     // 只在成功保存真实头像文件后才提取颜色
                     if (avatarResult.needsColorExtraction && avatarResult.avatarUrl && electronAPI.saveAvatarColor) {
@@ -457,15 +590,17 @@ const settingsManager = (() => {
                             }
                         });
                     }
-                    agentAvatarPreview.src = avatarResult.avatarUrl;
-                    mainRendererFunctions.setCroppedFile('agent', null);
-                    agentAvatarInput.value = '';
+                    if (isSaveContextCurrent() && mainRendererFunctions.getCroppedFile('agent') === croppedFile) {
+                        if (agentAvatarPreview) agentAvatarPreview.src = avatarResult.avatarUrl;
+                        mainRendererFunctions.setCroppedFile('agent', null);
+                        if (agentAvatarInput) agentAvatarInput.value = '';
+                    }
                 }
             } catch (readError) {
                 console.error("读取Agent头像文件失败:", readError);
                 uiHelper.showToastNotification(`读取Agent头像文件失败: ${readError.message}`, 'error');
                 reportSettingsSaveResult(agentSettingsForm, false, readError.message);
-                return; // 中断保存
+                return { success: false, error: readError.message }; // 中断保存
             }
         }
 
@@ -476,56 +611,72 @@ const settingsManager = (() => {
             console.error('[SettingsManager] Failed to save agent settings:', error);
             uiHelper.showToastNotification(`保存Agent设置时出错: ${error.message}`, 'error');
             reportSettingsSaveResult(agentSettingsForm, false, error.message);
-            return;
+            return { success: false, error: error.message };
         }
-        const saveButton = agentSettingsForm.querySelector('button[type="submit"]');
+        if (!isSaveContextCurrent()) {
+            return { success: result?.success === true, stale: true, result };
+        }
+        if (!result?.success) {
+            reportSettingsSaveResult(agentSettingsForm, false, result?.error || result?.message || 'save-failed');
+            if (saveButton) uiHelper.showSaveFeedback(saveButton, false, '保存失败', '保存 Agent 设置');
+            uiHelper.showToastNotification(`保存Agent设置失败: ${result?.error || '未知错误'}`, 'error');
+            return { success: false, error: result?.error || 'save-failed' };
+        }
 
-        if (result.success) {
-            if (saveButton) uiHelper.showSaveFeedback(saveButton, true, '已保存!', '保存 Agent 设置');
-            try {
+        if (agentSettingsRevision === saveRevision) {
+            isAgentSettingsDirty = false;
+        }
+        if (saveButton) uiHelper.showSaveFeedback(saveButton, true, '已保存!', '保存 Agent 设置');
+        try {
+            if (window.itemListManager?.loadItems) {
                 await window.itemListManager.loadItems();
+            }
 
-                const currentSelectedItem = refs.currentSelectedItemRef.get();
-                if (currentSelectedItem.id === agentId && currentSelectedItem.type === 'agent') {
-                    const updatedAgentConfig = await electronAPI.getAgentConfig(agentId);
-                
-                    // ⚠️ 检查是否返回错误对象
-                    if (updatedAgentConfig && updatedAgentConfig.error) {
-                        console.error(`[SettingsManager] Failed to get updated agent config:`, updatedAgentConfig.error);
-                        uiHelper.showToastNotification(`无法刷新Agent配置: ${updatedAgentConfig.error}`, 'warning');
-                        // 仍然更新名称，但不更新其他可能缺失的属性
-                        refs.currentSelectedItemRef.set({ ...currentSelectedItem, name: newConfig.name });
+            const currentSelectedItem = refs.currentSelectedItemRef?.get?.();
+            if (currentSelectedItem && currentSelectedItem.id === agentId && currentSelectedItem.type === 'agent') {
+                const updatedAgentConfig = await electronAPI.getAgentConfig(agentId);
+                const selectedNow = refs.currentSelectedItemRef?.get?.();
+                if (!isSaveContextCurrent() || selectedNow?.id !== agentId || selectedNow?.type !== 'agent') {
+                    return { success: true, stale: true, result };
+                }
+
+                // ⚠️ 检查是否返回错误对象
+                if (updatedAgentConfig && updatedAgentConfig.error) {
+                    console.error(`[SettingsManager] Failed to get updated agent config:`, updatedAgentConfig.error);
+                    uiHelper.showToastNotification(`无法刷新Agent配置: ${updatedAgentConfig.error}`, 'warning');
+                    // 仍然更新名称，但不更新其他可能缺失的属性
+                    refs.currentSelectedItemRef.set({ ...currentSelectedItem, name: newConfig.name });
+                    if (selectedItemNameForSettingsSpan) {
                         selectedItemNameForSettingsSpan.textContent = newConfig.name;
-                        if (mainRendererFunctions.updateChatHeader) {
-                            mainRendererFunctions.updateChatHeader(`与 ${newConfig.name} 聊天中`);
-                        }
-                    } else if (updatedAgentConfig) {
-                        const nextSelectedItem = currentSelectedItem.config
-                            ? { ...currentSelectedItem, name: newConfig.name, config: updatedAgentConfig }
-                            : { ...currentSelectedItem, ...updatedAgentConfig, name: newConfig.name };
-                        refs.currentSelectedItemRef.set(nextSelectedItem);
+                    }
+                    if (mainRendererFunctions.updateChatHeader) {
+                        mainRendererFunctions.updateChatHeader(`与 ${newConfig.name} 聊天中`);
+                    }
+                } else if (updatedAgentConfig) {
+                    const nextSelectedItem = currentSelectedItem.config
+                        ? { ...currentSelectedItem, name: newConfig.name, config: updatedAgentConfig }
+                        : { ...currentSelectedItem, ...updatedAgentConfig, name: newConfig.name };
+                    refs.currentSelectedItemRef.set(nextSelectedItem);
 
-                        // Update other UI parts via callbacks or direct calls if modules are passed in
-                        if (mainRendererFunctions.updateChatHeader) {
-                            mainRendererFunctions.updateChatHeader(`与 ${newConfig.name} 聊天中`);
-                        }
-                        if (messageRenderer) {
-                            messageRenderer.setCurrentItemAvatar(updatedAgentConfig.avatarUrl);
-                            messageRenderer.setCurrentItemAvatarColor(updatedAgentConfig.avatarCalculatedColor || null);
-                        }
+                    // Update other UI parts via callbacks or direct calls if modules are passed in
+                    if (mainRendererFunctions.updateChatHeader) {
+                        mainRendererFunctions.updateChatHeader(`与 ${newConfig.name} 聊天中`);
+                    }
+                    if (messageRenderer) {
+                        messageRenderer.setCurrentItemAvatar(updatedAgentConfig.avatarUrl);
+                        messageRenderer.setCurrentItemAvatarColor(updatedAgentConfig.avatarCalculatedColor || null);
+                    }
+                    if (selectedItemNameForSettingsSpan) {
                         selectedItemNameForSettingsSpan.textContent = newConfig.name;
                     }
                 }
-            } catch (projectionError) {
-                console.error('[SettingsManager] Agent settings saved, but UI projection failed:', projectionError);
-                uiHelper.showToastNotification(`Agent设置已保存，但界面刷新失败: ${projectionError.message || projectionError}`, 'warning');
             }
-            reportSettingsSaveResult(agentSettingsForm, true);
-        } else {
-            reportSettingsSaveResult(agentSettingsForm, false, result.error || 'save-failed');
-            if (saveButton) uiHelper.showSaveFeedback(saveButton, false, '保存失败', '保存 Agent 设置');
-            uiHelper.showToastNotification(`保存Agent设置失败: ${result.error}`, 'error');
+        } catch (projectionError) {
+            console.error('[SettingsManager] Agent settings saved, but UI projection failed:', projectionError);
+            uiHelper.showToastNotification(`Agent设置已保存，但界面刷新失败: ${projectionError.message || projectionError}`, 'warning');
         }
+        if (isSaveContextCurrent()) reportSettingsSaveResult(agentSettingsForm, true);
+        return { success: true, stale: !isSaveContextCurrent(), result };
     }
 
     /**
@@ -542,7 +693,71 @@ const settingsManager = (() => {
         const itemTypeDisplay = currentSelectedItem.type === 'group' ? '群组' : 'Agent';
         const itemName = currentSelectedItem.name || '当前选中的项目';
 
-        const confirmed = await uiHelper.showConfirmDialog(`您确定要删除 ${itemTypeDisplay} "${itemName}" 吗？其所有聊天记录和设置都将被删除，此操作不可撤销！`, '删除确认', '删除', '取消', true);
+        let confirmed = false;
+        if (window.VCPUIUX?.mountRiskConfirmation) {
+            confirmed = await new Promise(resolve => {
+                const createRiskScope = () => {
+                    if (window.VCPLifecycle?.LifecycleScope) {
+                        return new window.VCPLifecycle.LifecycleScope('agent-delete-risk');
+                    }
+                    const disposers = new Set();
+                    let active = true;
+                    const scope = {
+                        label: 'agent-delete-risk',
+                        get active() { return active; },
+                        own(disposer) { disposers.add(disposer); return disposer; },
+                        listen(target, type, handler, options) {
+                            target.addEventListener(type, handler, options);
+                            return scope.own(() => target.removeEventListener(type, handler, options));
+                        },
+                        child(childLabel) {
+                            return createRiskScope();
+                        },
+                        dispose: async () => {
+                            active = false;
+                            for (const d of disposers) {
+                                try { d(); } catch (_) {}
+                            }
+                            disposers.clear();
+                        }
+                    };
+                    return scope;
+                };
+                const scope = createRiskScope();
+                let settled = false;
+                let modal = null;
+                const finish = async (result) => {
+                    if (settled) return;
+                    settled = true;
+                    if (modal) modal.setOpen(false);
+                    try {
+                        await scope.dispose();
+                    } catch (_) {}
+                    resolve(result);
+                };
+                modal = window.VCPUIUX.mountRiskConfirmation({
+                    title: `删除 ${itemTypeDisplay}`,
+                    description: `确定要删除 ${itemTypeDisplay} "${itemName}" 吗？该操作将永久清除其所有聊天记录与设置，不可撤销。`,
+                    acknowledgeLabel: `我已知晓并确认删除该 ${itemTypeDisplay}`,
+                    cancelLabel: '取消',
+                    confirmLabel: '确认删除',
+                    open: true,
+                    acknowledged: false,
+                    onAcknowledgedChange: (val) => {
+                        modal?.setAcknowledged(val);
+                    },
+                    onConfirm: () => {
+                        void finish(true);
+                    },
+                    onCancel: () => {
+                        void finish(false);
+                    }
+                }, scope);
+            });
+        } else {
+            confirmed = await uiHelper.showConfirmDialog(`您确定要删除 ${itemTypeDisplay} "${itemName}" 吗？其所有聊天记录和设置都将被删除，此操作不可撤销！`, '删除确认', '删除', '取消', true);
+        }
+
         if (!confirmed) {
             reportSettingsDeleteResult(agentSettingsForm, false, { cancelled: true });
             return;
@@ -609,23 +824,10 @@ const settingsManager = (() => {
      * @param {string} currentSecondaryVoice - The currently selected secondary voice.
      */
     function ensureThemedTtsSelects() {
-        if (!window.VCPUI || document.documentElement.dataset.uiMode !== 'next') return;
-        try {
-            agentTtsPrimarySelectController = window.VCPUI.enhance(
-                'Select',
-                agentTtsVoicePrimarySelect,
-                { label: '主语言模型', size: 'md' }
-            );
-            agentTtsSecondarySelectController = window.VCPUI.enhance(
-                'Select',
-                agentTtsVoiceSecondarySelect,
-                { label: '副语言模型', size: 'md' }
-            );
-            agentTtsPrimarySelectController?.refresh?.();
-            agentTtsSecondarySelectController?.refresh?.();
-        } catch (error) {
-            console.warn('[SettingsManager] Failed to apply themed TTS Select proxy:', error);
-        }
+        // Completely stop injecting WebAwesome into the sidebar TTS selects.
+        // Sidebar selects are exclusively styled by styles/ui-system/settings-sidebar.css
+        // with strict 32px height, 8px radius, and unified borders identical to adjacent inputs.
+        return;
     }
 
     async function populateTtsModels(currentPrimaryVoice, currentSecondaryVoice) {
@@ -653,20 +855,18 @@ const settingsManager = (() => {
         try {
             let optionList = [];
 
-            // 本地与网络模式统一由当前 TTS 引擎返回音色。网络模式直接返回
-            // MiMo 固定预置音色，不再读取旧供应商遗留的 webindexmodel.json。
+            // Both local and network modes use the upstream TTS capability.
+            // The retired WebIndexTTS2 catalog is no longer part of the runtime.
             const models = await electronAPI.sovitsGetModels();
             if (Array.isArray(models)) {
                 optionList = models;
-            } else {
-                optionList = models && typeof models === 'object'
-                    ? Object.keys(models).map(modelName => ({
-                        id: modelName,
-                        voice: modelName,
-                        displayName: modelName,
-                        type: isNetworkMode ? 'preset' : 'local'
-                    }))
-                    : [];
+            } else if (models && typeof models === 'object') {
+                optionList = Object.keys(models).map(modelName => ({
+                    id: modelName,
+                    voice: modelName,
+                    displayName: modelName,
+                    type: isNetworkMode ? 'preset' : 'local'
+                }));
             }
 
             const seenVoices = new Set();
@@ -710,7 +910,6 @@ const settingsManager = (() => {
                     });
                     return nodes;
                 }
-
                 const groupDefinitions = [
                     ['preset', 'MiMo 预置音色'],
                     ['voicedesign', 'MiMo 自然语言控制'],
@@ -723,11 +922,9 @@ const settingsManager = (() => {
                     group.label = label;
                     items.forEach(item => {
                         const optionValue = item.voice || item.id;
-                        group.appendChild(createOption(
-                            optionValue,
-                            item.displayName || optionValue,
-                            { selected: optionValue === selectedValue }
-                        ));
+                        group.appendChild(createOption(optionValue, item.displayName || optionValue, {
+                            selected: optionValue === selectedValue
+                        }));
                     });
                     nodes.push(group);
                 });
@@ -736,9 +933,7 @@ const settingsManager = (() => {
             const primaryOptions = createOptionGroups('不使用语音', currentPrimaryVoice);
             const secondaryOptions = createOptionGroups('不使用', currentSecondaryVoice);
             if (optionList.length === 0) {
-                const emptyLabel = isNetworkMode
-                    ? '未找到 MiMo 音色'
-                    : '未找到模型,请启动Sovits';
+                const emptyLabel = isNetworkMode ? '未找到 MiMo 音色' : '未找到模型,请启动Sovits';
                 primaryOptions.push(createOption('', emptyLabel, { disabled: true }));
                 secondaryOptions.push(createOption('', emptyLabel, { disabled: true }));
             }
@@ -761,95 +956,6 @@ const settingsManager = (() => {
             ensureThemedTtsSelects();
             uiHelper.showToastNotification(isNetworkMode ? '获取网络音色失败' : '获取Sovits语音模型失败', 'error');
         }
-    }
-
-    function resizeTtsDirectorEditor(editor, expanded = editor === document.activeElement) {
-        if (!editor) return;
-        if (!expanded) {
-            editor.style.height = '';
-            editor.rows = 1;
-            return;
-        }
-        editor.rows = 4;
-        editor.style.height = 'auto';
-        editor.style.height = `${Math.min(Math.max(editor.scrollHeight, 132), 360)}px`;
-    }
-
-    function bindTtsDirectorEditor(editor, onInput) {
-        editor.addEventListener('focus', () => {
-            editor.closest('.tts-director-item, .tts-director-composer')?.classList.add('is-editing');
-            resizeTtsDirectorEditor(editor, true);
-            scheduleStickyButtonsRefresh();
-        });
-        editor.addEventListener('input', () => {
-            onInput?.(editor.value);
-            resizeTtsDirectorEditor(editor, true);
-            updateSectionSummary('tts');
-            scheduleStickyButtonsRefresh();
-        });
-        editor.addEventListener('blur', () => {
-            editor.closest('.tts-director-item, .tts-director-composer')?.classList.remove('is-editing');
-            resizeTtsDirectorEditor(editor, false);
-            scheduleStickyButtonsRefresh();
-        });
-    }
-
-    function renderTtsDirectorPrompts() {
-        if (!agentTtsDirectorPromptsContainer) return;
-        agentTtsDirectorPromptsContainer.replaceChildren();
-
-        currentAgentTtsDirectorPrompts.forEach((prompt, index) => {
-            const row = document.createElement('div');
-            row.className = 'tts-director-item';
-
-            const editor = document.createElement('textarea');
-            editor.className = 'tts-director-editor';
-            editor.rows = 1;
-            editor.value = prompt;
-            editor.setAttribute('aria-label', `导演提示词 ${index + 1}`);
-            bindTtsDirectorEditor(editor, value => {
-                currentAgentTtsDirectorPrompts[index] = value;
-            });
-            editor.addEventListener('blur', () => {
-                const value = editor.value.trim();
-                if (value) {
-                    currentAgentTtsDirectorPrompts[index] = value;
-                } else {
-                    currentAgentTtsDirectorPrompts.splice(index, 1);
-                    renderTtsDirectorPrompts();
-                }
-            });
-
-            const removeButton = document.createElement('button');
-            removeButton.type = 'button';
-            removeButton.className = 'small-button tts-director-action-button';
-            removeButton.textContent = '−';
-            removeButton.title = '删除该导演提示词';
-            removeButton.setAttribute('aria-label', `删除导演提示词 ${index + 1}`);
-            removeButton.addEventListener('mousedown', event => event.preventDefault());
-            removeButton.addEventListener('click', () => {
-                currentAgentTtsDirectorPrompts.splice(index, 1);
-                renderTtsDirectorPrompts();
-            });
-
-            row.append(editor, removeButton);
-            agentTtsDirectorPromptsContainer.appendChild(row);
-        });
-        updateSectionSummary('tts');
-        scheduleStickyButtonsRefresh();
-    }
-
-    function addTtsDirectorPrompt() {
-        const prompt = agentTtsDirectorPromptInput?.value?.trim() || '';
-        if (!prompt) {
-            uiHelper.showToastNotification('请先填写自然语言导演提示词。', 'warning');
-            agentTtsDirectorPromptInput?.focus();
-            return;
-        }
-        currentAgentTtsDirectorPrompts.push(prompt);
-        agentTtsDirectorPromptInput.value = '';
-        renderTtsDirectorPrompts();
-        agentTtsDirectorPromptInput.focus();
     }
 
     /**
@@ -941,39 +1047,9 @@ const settingsManager = (() => {
             itemSettingsContainerTitle = options.elements.itemSettingsContainerTitle;
             selectedItemNameForSettingsSpan = options.elements.selectedItemNameForSettingsSpan;
             deleteItemBtn = options.elements.deleteItemBtn;
-            agentSettingsForm = options.elements.agentSettingsForm;
-            editingAgentIdInput = options.elements.editingAgentIdInput;
-            agentNameInput = options.elements.agentNameInput;
-            agentAvatarInput = options.elements.agentAvatarInput;
-            agentAvatarPreview = options.elements.agentAvatarPreview;
-            agentModelInput = options.elements.agentModelInput;
-            agentTemperatureInput = options.elements.agentTemperatureInput;
-            agentContextTokenLimitInput = options.elements.agentContextTokenLimitInput;
-            agentMaxOutputTokensInput = options.elements.agentMaxOutputTokensInput;
-            agentTopPInput = document.getElementById('agentTopP');
-            agentTopKInput = document.getElementById('agentTopK');
-
-            agentAvatarBorderColorInput = document.getElementById('agentAvatarBorderColor');
-            agentAvatarBorderColorTextInput = document.getElementById('agentAvatarBorderColorText');
-            agentNameTextColorInput = document.getElementById('agentNameTextColor');
-            agentNameTextColorTextInput = document.getElementById('agentNameTextColorText');
-            agentCustomCssInput = document.getElementById('agentCustomCss');
-            openModelSelectBtn = options.elements.openModelSelectBtn;
+            refreshAgentControls();
             topicSummaryModelInput = options.elements.topicSummaryModelInput;
             openTopicSummaryModelSelectBtn = options.elements.openTopicSummaryModelSelectBtn;
-
-            agentTtsVoicePrimarySelect = document.getElementById('agentTtsVoicePrimary');
-            agentTtsRegexPrimaryInput = document.getElementById('agentTtsRegexPrimary');
-            agentTtsVoiceSecondarySelect = document.getElementById('agentTtsVoiceSecondary');
-            agentTtsRegexSecondaryInput = document.getElementById('agentTtsRegexSecondary');
-            refreshTtsModelsBtn = document.getElementById('refreshTtsModelsBtn');
-            agentTtsSpeedSlider = options.elements.agentTtsSpeedSlider;
-            ttsSpeedValueSpan = options.elements.ttsSpeedValueSpan;
-            agentTtsDirectorPromptInput = document.getElementById('agentTtsDirectorPromptInput');
-            addAgentTtsDirectorPromptBtn = document.getElementById('addAgentTtsDirectorPromptBtn');
-            fillAgentTtsDirectorTemplateBtn = document.getElementById('fillAgentTtsDirectorTemplateBtn');
-            agentTtsDirectorPromptsContainer = document.getElementById('agentTtsDirectorPromptsContainer');
-
             // 🟢 监听模态框就绪事件，动态绑定延迟加载的元素
             document.addEventListener('modal-ready', (e) => {
                 const { modalId } = e.detail;
@@ -1017,9 +1093,70 @@ const settingsManager = (() => {
                 }
             });
 
+            if (!globalThis.vcpTopicSummaryClickDelegated) {
+                globalThis.vcpTopicSummaryClickDelegated = true;
+                document.addEventListener('click', (ev) => {
+                    const btn = ev.target?.closest?.('#openTopicSummaryModelSelectBtn');
+                    if (!btn) return;
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const input = document.getElementById('topicSummaryModel');
+                    handleOpenModelSelect(input);
+                });
+            }
+
             // Event Listeners for always-present elements
             if (agentSettingsForm) {
-                agentSettingsForm.addEventListener('submit', saveCurrentAgentSettings);
+                const updateStateDotIndicator = (state = 'done') => {
+                    const indicator = getAgentControl('formSaveStateIndicator');
+                    const dotHost = getAgentControl('formStateDotHost');
+                    const label = getAgentControl('formStateDotLabel');
+                    if (!indicator || !dotHost || !label) return;
+                    indicator.dataset.state = state;
+                    label.textContent = state === 'warning' ? '未保存更改' : (state === 'ongoing' ? '保存中...' : '已保存');
+                    dotHost.replaceChildren();
+                    if (window.VCPUIUX?.mountStateDot) {
+                        try {
+                            window.VCPUIUX.mountStateDot(dotHost, { state, size: 7 }, {
+                                own: () => {},
+                                child: () => ({ own: () => {}, listen: () => {}, dispose: () => {} }),
+                                listen: () => {},
+                                dispose: () => {}
+                            });
+                        } catch (_) {}
+                    }
+                };
+                globalThis.vcpUpdateFormStateDot = updateStateDotIndicator;
+
+                agentSettingsForm.addEventListener('submit', async (ev) => {
+                    ev.preventDefault();
+                    const submitToken = agentSettingsPopulateToken;
+                    const submitDisplayToken = settingsDisplayToken;
+                    clearTimeout(agentSettingsAutosaveTimer);
+                    updateStateDotIndicator('ongoing');
+                    try {
+                        const saveResult = await saveCurrentAgentSettings(ev);
+                        if (submitToken !== agentSettingsPopulateToken ||
+                            submitDisplayToken !== settingsDisplayToken || saveResult?.stale) return;
+                        if (saveResult && saveResult.success) {
+                            updateStateDotIndicator(isAgentSettingsDirty ? 'warning' : 'done');
+                        } else {
+                            updateStateDotIndicator('warning');
+                        }
+                    } catch (err) {
+                        console.error('[SettingsManager] Save submit error:', err);
+                        if (submitToken === agentSettingsPopulateToken && submitDisplayToken === settingsDisplayToken) {
+                            updateStateDotIndicator('warning');
+                        }
+                    }
+                });
+                const markDirty = () => {
+                    isAgentSettingsDirty = true;
+                    ++agentSettingsRevision;
+                    updateStateDotIndicator('warning');
+                };
+                agentSettingsForm.addEventListener('input', markDirty);
+                agentSettingsForm.addEventListener('change', markDirty);
             }
             if (deleteItemBtn) {
                 deleteItemBtn.addEventListener('click', handleDeleteCurrentItem);
@@ -1097,7 +1234,7 @@ const settingsManager = (() => {
             }
 
             if (openModelSelectBtn) {
-                openModelSelectBtn.addEventListener('click', () => handleOpenModelSelect(agentModelInput));
+                openModelSelectBtn.addEventListener('click', () => handleOpenModelSelect(getAgentControl('agentModel') || agentModelInput));
             }
             if (modelSearchInput) {
                 modelSearchInput.addEventListener('input', filterModels);
@@ -1119,9 +1256,6 @@ const settingsManager = (() => {
                         }
                     } catch (e) { /* ignore */ }
                     populateModelList(models, currentModelSelectCallback, hotModelIds, favoriteModelIds);
-                    const available = Array.isArray(models) && models.length > 0;
-                    uiHelper.showToastNotification(available ? '模型列表已刷新' : '模型服务暂不可用',
-                        available ? 'success' : 'error');
                 });
             }
 
@@ -1131,37 +1265,6 @@ const settingsManager = (() => {
                 promptManager?.destroy?.();
                 promptManager = null;
             }, { once: true });
-
-            if (agentTtsSpeedSlider && ttsSpeedValueSpan) {
-                agentTtsSpeedSlider.addEventListener('input', () => {
-                    ttsSpeedValueSpan.textContent = parseFloat(agentTtsSpeedSlider.value).toFixed(1);
-                    syncRangeProgress(agentTtsSpeedSlider);
-                });
-                syncRangeProgress(agentTtsSpeedSlider);
-            }
-
-            if (addAgentTtsDirectorPromptBtn) {
-                addAgentTtsDirectorPromptBtn.addEventListener('mousedown', event => event.preventDefault());
-                addAgentTtsDirectorPromptBtn.addEventListener('click', addTtsDirectorPrompt);
-            }
-            if (fillAgentTtsDirectorTemplateBtn) {
-                fillAgentTtsDirectorTemplateBtn.addEventListener('click', () => {
-                    const existing = agentTtsDirectorPromptInput.value.trim();
-                    agentTtsDirectorPromptInput.value = existing
-                        ? `${existing}\n\n${TTS_DIRECTOR_TEMPLATE}`
-                        : TTS_DIRECTOR_TEMPLATE;
-                    agentTtsDirectorPromptInput.focus();
-                    resizeTtsDirectorEditor(agentTtsDirectorPromptInput, true);
-                });
-            }
-            if (agentTtsDirectorPromptInput) {
-                bindTtsDirectorEditor(agentTtsDirectorPromptInput);
-                agentTtsDirectorPromptInput.addEventListener('keydown', event => {
-                    if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
-                    event.preventDefault();
-                    addTtsDirectorPrompt();
-                });
-            }
 
             if (refreshTtsModelsBtn) {
                 refreshTtsModelsBtn.addEventListener('click', async () => {
@@ -1179,14 +1282,8 @@ const settingsManager = (() => {
                 });
             }
 
-            // 将 TTS 原生 Select 升级为主题化 WebAwesome 代理。
-            // VCPUI API 就绪不等于 wa-select 已完成注册；组件包加载完成后
-            // 必须再尝试一次，才能从 native controller 升级为 WA proxy。
-            ensureThemedTtsSelects();
-            window.addEventListener('vcp-webawesome-loaded', ensureThemedTtsSelects, { once: true });
-
             // 创建正则设置UI
-            createStripRegexUI();
+            resolveRegexSlots();
 
             // 添加Agent设置滚动条粘性按钮逻辑
             setupAgentSettingsStickyButtons();
@@ -1194,22 +1291,48 @@ const settingsManager = (() => {
             // 设置鼠标快捷键
             setupMouseShortcuts();
 
-            // Setup color picker synchronization
-            setupColorPickerSync();
-
             // Setup unified collapsible sections
             setupAgentSettingsSections();
-
-            // Setup style collapsible
-            setupStyleCollapsible();
 
             // Setup reset colors button
             if (resetAvatarColorsBtn) {
                 resetAvatarColorsBtn.addEventListener('click', handleResetAvatarColors);
             }
 
+            // Setup real-time two-way sync for avatar border color and name text color
+            const syncColorPair = (picker, textInput, onColorChange) => {
+                if (!picker || !textInput) return;
+                picker.addEventListener('input', () => {
+                    textInput.value = picker.value;
+                    onColorChange?.(picker.value);
+                });
+                textInput.addEventListener('input', () => {
+                    let val = textInput.value.trim();
+                    if (!val.startsWith('#') && /^[0-9a-fA-F]{6}$/.test(val)) {
+                        val = '#' + val;
+                    }
+                    if (/^#[0-9a-fA-F]{6}$/i.test(val)) {
+                        picker.value = val;
+                        onColorChange?.(val);
+                    }
+                });
+            };
+
+            syncColorPair(agentAvatarBorderColorInput, agentAvatarBorderColorTextInput, (hex) => {
+                if (agentAvatarPreview) {
+                    agentAvatarPreview.style.borderColor = hex;
+                }
+            });
+
+            syncColorPair(agentNameTextColorInput, agentNameTextColorTextInput, (hex) => {
+                const nameInput = getAgentControl('agentNameInput');
+                if (nameInput) {
+                    nameInput.style.color = hex;
+                }
+            });
+
             // Setup card CSS input real-time preview
-            const agentCardCssInput = document.getElementById('agentCardCss');
+            const agentCardCssInput = getAgentControl('agentCardCss');
             if (agentCardCssInput) {
                 agentCardCssInput.addEventListener('input', (e) => {
                     applyCardCssToIdentityContainer(e.target.value);
@@ -1217,6 +1340,9 @@ const settingsManager = (() => {
             }
 
             console.log('settingsManager initialized.');
+            document.dispatchEvent(new CustomEvent('vcp-settings-surface-updated', {
+                detail: { kind: 'agent', root: agentSettingsForm }
+            }));
 
             // --- Global Settings Enhancements ---
             const vcpServerUrlInput = document.getElementById('vcpServerUrl');
@@ -1228,7 +1354,7 @@ const settingsManager = (() => {
             }
         },
         prewarmPromptManager: async () => {
-            const systemPromptContainer = document.getElementById('systemPromptContainer');
+            const systemPromptContainer = getAgentControl('systemPromptContainer');
             if (systemPromptContainer && window.PromptManager && !promptManager) {
                 console.log('[SettingsManager] Pre-warming PromptManager...');
                 promptManager = new window.PromptManager();
@@ -1245,54 +1371,47 @@ const settingsManager = (() => {
         openModelSelectForInput: async (targetInputElement) => {
             await handleOpenModelSelect(targetInputElement);
         },
-        triggerAgentSave: async (overrideAgentId) => {
-            // 触发Agent设置保存（不含头像）。override 只能用于验证当前上下文，
-            // 不能把当前共享 DOM 的内容强行写入一个已切走的 Agent。
-            const formAgentId = editingAgentIdInput.value;
-            const agentId = overrideAgentId || formAgentId;
-            if (!agentId) return;
-            if (agentId !== formAgentId || (promptManager?.getAgentId?.() && promptManager.getAgentId() !== agentId)) {
-                console.debug(`[SettingsManager] Skipping stale triggerAgentSave for ${agentId}; current form is ${formAgentId || 'none'}.`);
-                return { success: false, stale: true };
-            }
-
-            let systemPromptData = {};
-            if (promptManager) {
-                await promptManager.saveCurrentModeData();
-                if (editingAgentIdInput.value !== agentId || promptManager.getAgentId?.() !== agentId) {
-                    console.debug(`[SettingsManager] Aborting stale triggerAgentSave after prompt persistence for ${agentId}.`);
-                    return { success: false, stale: true };
-                }
-
-                const currentPrompt = await promptManager.getCurrentSystemPrompt();
-                if (editingAgentIdInput.value !== agentId || promptManager.getAgentId?.() !== agentId) {
-                    console.debug(`[SettingsManager] Aborting stale triggerAgentSave after prompt read for ${agentId}.`);
-                    return { success: false, stale: true };
-                }
-                systemPromptData.systemPrompt = currentPrompt;
-            }
-
-            const newConfig = {
-                name: agentNameInput.value.trim(),
-                ...systemPromptData,
-                model: agentModelInput.value.trim() || 'gemini-pro',
-                temperature: parseOptionalNumberInput(agentTemperatureInput, Number.parseFloat),
-                contextTokenLimit: parseOptionalNumberInput(agentContextTokenLimitInput, value => Number.parseInt(value, 10)),
-                maxOutputTokens: parseOptionalNumberInput(agentMaxOutputTokensInput, value => Number.parseInt(value, 10)),
-                top_p: parseOptionalNumberInput(agentTopPInput, Number.parseFloat),
-                top_k: parseOptionalNumberInput(agentTopKInput, value => Number.parseInt(value, 10)),
-                streamOutput: document.getElementById('agentStreamOutputTrue').checked,
-                ttsVoicePrimary: agentTtsVoicePrimarySelect.value,
-                ttsRegexPrimary: agentTtsRegexPrimaryInput.value.trim(),
-                ttsVoiceSecondary: agentTtsVoiceSecondarySelect.value,
-                ttsRegexSecondary: agentTtsRegexSecondaryInput.value.trim(),
-                ttsDirectorPrompts: [...currentAgentTtsDirectorPrompts],
-                ttsSpeed: parseFloat(agentTtsSpeedSlider.value),
-                stripRegexes: currentAgentRegexes
-            };
-
-            await electronAPI.saveAgentConfig(agentId, newConfig);
+        // The MiMo director editor is a dynamic settings slot. Keep its
+        // canonical array and persistence contract in the manager while the
+        // slot owns rows, shortcuts and editor geometry.
+        getTtsDirectorPrompts: () => [...currentAgentTtsDirectorPrompts],
+        setTtsDirectorPrompts: (prompts) => {
+            currentAgentTtsDirectorPrompts = Array.isArray(prompts)
+                ? prompts.map(prompt => String(prompt ?? '').trim()).filter(Boolean)
+                : [];
+            updateSectionSummary('tts');
         },
+        getTtsDirectorTemplate: () => TTS_DIRECTOR_TEMPLATE,
+        // Presentation owners must use this narrow command rather than
+        // reproducing the collapse-state projection themselves.  The manager
+        // remains the only place that knows how the current Agent, summaries
+        // and persisted uiCollapseStates fit together.
+        toggleAgentSettingsSection: (key) => toggleAgentSettingsSection(key),
+        persistCollapseStatesForCurrentSelection: () => persistCollapseStatesForCurrentSelection(),
+        // Regex business actions.  The schema surface owns the buttons and the
+        // listeners; the manager owns what a click actually does.  Exposed as
+        // narrow commands so no presentation owner needs to reach into the
+        // regex DOM or duplicate the modal/import flow.
+        openRegexModal: (ruleData = null) => openRegexModal(ruleData),
+        cancelAutosave: () => {
+            if (agentSettingsAutosaveTimer) {
+                clearTimeout(agentSettingsAutosaveTimer);
+                agentSettingsAutosaveTimer = null;
+            }
+        },
+        handleImportRegex: () => handleImportRegex(),
+        // 兼容旧扩展调用，但禁止绕过保存按钮持久化共享表单。
+        triggerAgentSave: async () => ({
+            success: false,
+            skipped: true,
+            reason: 'manual-save-only',
+            error: '请点击保存 Agent 设置按钮提交更改。'
+        }),
+
+        /**
+         * 切 Tab 或关闭前不隐式提交设置，保留旧生命周期接口。
+         */
+        flushPendingSave: async () => ({ skipped: true, reason: 'manual-save-only' }),
 
         /**
          * 重新加载当前 Agent 的设置（用于外部触发刷新）
@@ -1309,35 +1428,20 @@ const settingsManager = (() => {
 
                 if (!isSettingsVisible) {
                     console.log('[SettingsManager] Settings tab not visible, performing silent config reload');
-
                     try {
-                        // 方案1：直接重新加载配置并填充表单，不切换标签
                         const config = await electronAPI.getAgentConfig(agentId);
-                        if (config && !config.error) {
-                            // 临时激活设置标签内容（不改变按钮状态）
-                            const originalDisplay = settingsTab.style.display;
-                            settingsTab.style.display = 'block';
-                            settingsTab.classList.add('active');
-
-                            // 等待 DOM 准备好
-                            await new Promise(resolve => setTimeout(resolve, 50));
-
-                            // 重新填充表单
-                            await populateAgentSettingsForm(agentId, config);
-                            console.log('[SettingsManager] Agent settings reloaded silently');
-
-                            // 恢复原始显示状态
-                            await new Promise(resolve => setTimeout(resolve, 50));
-                            settingsTab.classList.remove('active');
-                            if (originalDisplay !== 'block') {
-                                settingsTab.style.display = originalDisplay;
-                            }
-
-                            return { success: true, silent: true };
-                        } else {
+                        if (!config || config.error) {
                             console.error('[SettingsManager] Failed to load config for silent reload:', config?.error);
                             return await performFullTabSwitch(agentId);
                         }
+                        // The Surface keeps the canonical form detached while the
+                        // tab is inactive. Populate it in place without changing
+                        // tab classes or creating a temporary hit area.
+                        const viewToken = window.VCPSettingsSidebar?.show?.('agent', { id: agentId });
+                        const result = await populateAgentSettingsForm(agentId, config, viewToken);
+                        if (result?.stale) return result;
+                        console.log('[SettingsManager] Agent settings reloaded silently');
+                        return { success: true, silent: true };
                     } catch (error) {
                         console.error('[SettingsManager] Error during silent reload:', error);
                         return await performFullTabSwitch(agentId);
@@ -1348,7 +1452,8 @@ const settingsManager = (() => {
                 const config = await electronAPI.getAgentConfig(agentId);
                 if (config && !config.error) {
                     await new Promise(resolve => setTimeout(resolve, 50));
-                    await populateAgentSettingsForm(agentId, config);
+                    const viewToken = window.VCPSettingsSidebar?.show?.('agent', { id: agentId });
+                    await populateAgentSettingsForm(agentId, config, viewToken);
                     console.log('[SettingsManager] Agent settings reloaded successfully');
                     sessionStorage.removeItem('pendingAgentReload');
                     return { success: true };
@@ -1590,32 +1695,25 @@ const settingsManager = (() => {
     }
 
     /**
-     * Filters the model list based on the search input.
+     * Filters the legacy model list case-insensitively. Whitespace-separated
+     * terms use AND semantics, matching the shared typed model picker.
      */
     function filterModels() {
-        const filter = modelSearchInput.value.toLowerCase();
+        const terms = modelSearchInput.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+        const hasFilter = terms.length > 0;
         const items = modelList.getElementsByTagName('li');
+
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
-            // 分区标题跟随其子项的可见性
+            // 搜索时隐藏分区标题以得到扁平化结果；无搜索时恢复分区标题。
             if (item.classList.contains('model-section-title')) {
-                // 先隐藏标题，后面根据子项可见性再决定
-                item.style.display = filter ? 'none' : '';
+                item.style.display = hasFilter ? 'none' : '';
                 continue;
             }
-            const txtValue = item.textContent || item.innerText;
-            if (txtValue.toLowerCase().indexOf(filter) > -1) {
-                item.style.display = '';
-            } else {
-                item.style.display = 'none';
-            }
-        }
-        // 搜索时隐藏所有分区标题以得到扁平化结果
-        // 无搜索时恢复分区标题
-        if (!filter) {
-            for (let i = 0; i < items.length; i++) {
-                items[i].style.display = '';
-            }
+            const searchableText = (item.textContent || item.innerText || '').toLowerCase();
+            item.style.display = !hasFilter || terms.every(term => searchableText.includes(term))
+                ? ''
+                : 'none';
         }
     }
 
@@ -1665,92 +1763,30 @@ const settingsManager = (() => {
      */
     // --- Regex Settings V2 ---
 
-function createStripRegexUI() {
-        const ttsCollapsibleContainer = getSectionContainer('tts');
-        if (!ttsCollapsibleContainer || !ttsCollapsibleContainer.parentNode) {
-            console.warn('[SettingsManager] TTS collapsible container not found for regex UI insertion');
+function resolveRegexSlots() {
+        const section = getSectionContainer('regex');
+        if (!section) {
+            console.warn('[SettingsManager] regex section slot not found; the schema surface must render it');
+            stripRegexListContainer = null;
             return;
         }
-
-        const existingContainer = getSectionContainer('regex');
-        if (existingContainer) {
-            stripRegexListContainer = existingContainer.querySelector('#stripRegexListContainer');
-            return;
-        }
-
-        const section = document.createElement('div');
-        section.className = 'agent-settings-collapsible-container agent-settings-section strip-regex-container collapsed';
-        section.dataset.sectionKey = 'regex';
-
-        const header = document.createElement('div');
-        header.className = 'agent-settings-section-header';
-        header.id = 'regexToggleHeader';
-
-        const title = document.createElement('span');
-        title.className = 'agent-settings-section-title';
-        title.textContent = '正则设置';
-        header.appendChild(title);
-
-        const summary = document.createElement('div');
-        summary.className = 'agent-settings-section-summary';
-        summary.id = 'regexSummary';
-        header.appendChild(summary);
-
-        const toggleBtn = document.createElement('button');
-        toggleBtn.type = 'button';
-        toggleBtn.className = 'agent-settings-toggle-btn';
-        toggleBtn.id = 'regexToggleBtn';
-        toggleBtn.setAttribute('aria-label', '展开或收起正则设置');
-        toggleBtn.innerHTML = `
-            <svg class="toggle-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2">
-                <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-        `;
-        header.appendChild(toggleBtn);
-
-        const content = document.createElement('div');
-        content.className = 'agent-settings-section-content';
-        content.id = 'regexContent';
-
-        const shell = document.createElement('div');
-        shell.className = 'agent-settings-card-shell';
-
-        stripRegexListContainer = document.createElement('div');
-        stripRegexListContainer.id = 'stripRegexListContainer';
-        stripRegexListContainer.className = 'strip-regex-list-container';
-        shell.appendChild(stripRegexListContainer);
-
-        const addBtn = document.createElement('button');
-        addBtn.type = 'button';
-        addBtn.textContent = '添加正则';
-        addBtn.className = 'btn-add-regex';
-        addBtn.addEventListener('click', () => openRegexModal());
-        shell.appendChild(addBtn);
-
-        const importBtn = document.createElement('button');
-        importBtn.type = 'button';
-        importBtn.textContent = '导入正则';
-        importBtn.className = 'btn-add-regex btn-add-regex-secondary';
-        importBtn.addEventListener('click', () => handleImportRegex());
-        shell.appendChild(importBtn);
-
-        content.appendChild(shell);
-        section.appendChild(header);
-        section.appendChild(content);
-
-        ttsCollapsibleContainer.parentNode.insertBefore(section, ttsCollapsibleContainer.nextSibling);
-
-        console.log('[SettingsManager] Regex UI created after TTS collapsible container');
+        stripRegexListContainer = section.querySelector('#stripRegexListContainer');
     }
 
     function renderRegexList() {
         if (!stripRegexListContainer) return;
         stripRegexListContainer.innerHTML = '';
-        currentAgentRegexes.forEach(rule => {
-            const row = createRegexRow(rule);
-            stripRegexListContainer.appendChild(row);
-        });
+        if (currentAgentRegexes.length === 0) {
+            const emptyNotice = document.createElement('div');
+            emptyNotice.className = 'strip-regex-empty';
+            emptyNotice.textContent = '暂无正则规则';
+            stripRegexListContainer.appendChild(emptyNotice);
+        } else {
+            currentAgentRegexes.forEach(rule => {
+                const row = createRegexRow(rule);
+                stripRegexListContainer.appendChild(row);
+            });
+        }
         updateSectionSummary('regex');
         scheduleStickyButtonsRefresh();
     }
@@ -1766,27 +1802,22 @@ function createStripRegexUI() {
         title.title = rule.findPattern || '无查找内容';
 
         const buttonsContainer = document.createElement('div');
-        buttonsContainer.style.display = 'flex';
-        buttonsContainer.style.gap = '8px';
+        buttonsContainer.className = 'strip-regex-row-actions';
 
         const editBtn = document.createElement('button');
         editBtn.type = 'button';
-        editBtn.className = 'btn-edit-regex';  // 保持原始样式类，保持主题适应性
+        editBtn.className = 'btn-edit-regex';
         editBtn.title = '编辑规则';
-        // 调整为与删除按钮完全相同的大小（38x38px）
-        editBtn.style.height = '38px';    // 与删除按钮相同高度
-        editBtn.style.width = '38px';     // 与删除按钮相同宽度
-        editBtn.style.minHeight = '38px';
-        editBtn.style.minWidth = '38px';
-        editBtn.style.padding = '0';      // 与删除按钮相同的内边距
-        editBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`;
+        editBtn.setAttribute('aria-label', `编辑规则: ${rule.title || '未命名'}`);
+        editBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 2.5a1.8 1.8 0 0 1 2.5 2.5L5 14H2v-3L11.5 2.5z"/></svg>`;
         editBtn.addEventListener('click', () => openRegexModal(rule));
 
         const deleteBtn = document.createElement('button');
         deleteBtn.type = 'button';
         deleteBtn.className = 'btn-delete-regex';
         deleteBtn.title = '删除规则';
-        deleteBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+        deleteBtn.setAttribute('aria-label', `删除规则: ${rule.title || '未命名'}`);
+        deleteBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9a1 1 0 001 .9h4.6a1 1 0 001-.9L12 4M6.5 6.8v4.4M9.5 6.8v4.4"/></svg>`;
         deleteBtn.addEventListener('click', async () => {
             if (await uiHelper.showConfirmDialog(`确定要删除规则 "${rule.title}" 吗？`, '删除确认', '删除', '取消', true)) {
                 currentAgentRegexes = currentAgentRegexes.filter(r => r.id !== rule.id);
@@ -1906,6 +1937,7 @@ function createStripRegexUI() {
      */
     async function handleImportRegex() {
         const agentId = editingAgentIdInput.value;
+        const populateToken = agentSettingsPopulateToken;
         if (!agentId) {
             uiHelper.showToastNotification('请先选择一个Agent。', 'warning');
             return;
@@ -1913,11 +1945,20 @@ function createStripRegexUI() {
 
         try {
             const result = await electronAPI.importRegexRules(agentId);
+            if (editingAgentIdInput?.value !== agentId ||
+                agentSettingsPopulateToken !== populateToken) return;
 
             if (result.success) {
-                currentAgentRegexes = result.rules;
+                const existingKeys = new Set(currentAgentRegexes.map(rule => rule.id || rule.title));
+                for (const rule of result.rules || []) {
+                    const key = rule.id || rule.title;
+                    if (existingKeys.has(key)) continue;
+                    currentAgentRegexes.push(structuredClone(rule));
+                    existingKeys.add(key);
+                }
                 renderRegexList();
-                uiHelper.showToastNotification('正则规则导入成功！', 'success');
+                agentSettingsForm?.dispatchEvent(new CustomEvent('input', { bubbles: true }));
+                uiHelper.showToastNotification('正则规则已导入草稿，请点击保存 Agent 设置以生效。', 'info');
             } else if (!result.canceled) {
                 // Don't show an error if the user just canceled the dialog
                 uiHelper.showToastNotification(`导入失败: ${result.error}`, 'error');
@@ -1946,7 +1987,7 @@ function createStripRegexUI() {
 
             // 检测是否到达底部（引入滞后性/Hysteresis逻辑以消除抖动）
             const distanceToBottom = settingsTab.scrollHeight - settingsTab.scrollTop - settingsTab.clientHeight;
-            
+
             // 判定逻辑：
             // 1. 如果当前未显示（isCurrentlyAtBottom = false），则在距离底部 < 10px 时触发显示
             // 2. 如果当前已显示（isCurrentlyAtBottom = true），则只有在向上滚动超过 60px 时才隐藏
@@ -1988,82 +2029,6 @@ function createStripRegexUI() {
 
 
     /**
-     * 设置颜色选择器与文本输入框的同步
-     */
-    function setupColorPickerSync() {
-        // 头像边框颜色同步
-        if (agentAvatarBorderColorInput && agentAvatarBorderColorTextInput) {
-            agentAvatarBorderColorInput.addEventListener('input', (e) => {
-                agentAvatarBorderColorTextInput.value = e.target.value;
-                updateAvatarPreviewStyle();
-            });
-
-            agentAvatarBorderColorTextInput.addEventListener('input', (e) => {
-                const color = e.target.value.trim();
-                if (/^#[0-9A-F]{6}$/i.test(color)) {
-                    agentAvatarBorderColorInput.value = color;
-                    updateAvatarPreviewStyle();
-                }
-            });
-
-            agentAvatarBorderColorTextInput.addEventListener('blur', (e) => {
-                const color = e.target.value.trim();
-                if (!/^#[0-9A-F]{6}$/i.test(color)) {
-                    e.target.value = agentAvatarBorderColorInput.value;
-                    uiHelper.showToastNotification('颜色格式无效，请使用 #RRGGBB 格式', 'warning');
-                }
-            });
-        }
-
-        // 名称文字颜色同步
-        if (agentNameTextColorInput && agentNameTextColorTextInput) {
-            agentNameTextColorInput.addEventListener('input', (e) => {
-                agentNameTextColorTextInput.value = e.target.value;
-            });
-
-            agentNameTextColorTextInput.addEventListener('input', (e) => {
-                const color = e.target.value.trim();
-                if (/^#[0-9A-F]{6}$/i.test(color)) {
-                    agentNameTextColorInput.value = color;
-                }
-            });
-
-            agentNameTextColorTextInput.addEventListener('blur', (e) => {
-                const color = e.target.value.trim();
-                if (!/^#[0-9A-F]{6}$/i.test(color)) {
-                    e.target.value = agentNameTextColorInput.value;
-                    uiHelper.showToastNotification('颜色格式无效，请使用 #RRGGBB 格式', 'warning');
-                }
-            });
-        }
-
-        console.log('[SettingsManager] Color picker synchronization setup complete.');
-    }
-
-    /**
-     * 更新头像预览的样式
-     */
-    function updateAvatarPreviewStyle() {
-        if (agentAvatarPreview && agentAvatarBorderColorInput) {
-            agentAvatarPreview.style.borderColor = agentAvatarBorderColorInput.value;
-        }
-    }
-
-    /**
-     * 设置参数容器的折叠功能
-     */
-function setupParamsCollapsible() {
-        setupAgentSettingsSections();
-    }
-
-    /**
-     * 设置语音设置容器的折叠功能
-     */
-    function setupTtsCollapsible() {
-        setupAgentSettingsSections();
-    }
-
-    /**
      * 获取当前所有折叠区域的状态
      */
     function getCurrentCollapseStates() {
@@ -2090,7 +2055,7 @@ function setupParamsCollapsible() {
 
         const header = container.querySelector('.agent-settings-section-header');
         const summary = container.querySelector('.agent-settings-section-summary');
-        const toggleBtn = container.querySelector('.agent-settings-toggle-btn');
+        const toggleBtn = container.querySelector('.agent-settings-toggle-btn, .agent-settings-section-toggle');
         if (!header || !summary || !toggleBtn) {
             console.warn(`[SettingsManager] Missing collapsible controls for section "${key}"`);
             return null;
@@ -2104,23 +2069,30 @@ function setupParamsCollapsible() {
             toggleBtn,
             buildSummary,
             setCollapsed(collapsed) {
-                this.container.classList.toggle('collapsed', !!collapsed);
+                const isCollapsed = !!collapsed;
+                this.container.classList.toggle('collapsed', isCollapsed);
+                const isExpanded = !isCollapsed;
+                this.header?.setAttribute('aria-expanded', String(isExpanded));
+                this.toggleBtn?.setAttribute('aria-expanded', String(isExpanded));
             }
         };
 
-        if (!header.dataset.collapsibleBound) {
-            header.addEventListener('click', (event) => {
-                event.preventDefault();
-                controller.setCollapsed(!controller.container.classList.contains('collapsed'));
-                updateSectionSummary(key);
-                persistCollapseStatesForCurrentSelection();
-                scheduleStickyButtonsRefresh();
-            });
-            header.dataset.collapsibleBound = 'true';
-        }
-
         sectionControllers.set(key, controller);
         return controller;
+    }
+
+    // Keep the Agent configuration's uiCollapseStates as the canonical durable
+    // state.  UI presentation owners only request this command; they neither
+    // write the config directly nor retain a duplicate collapsed-state store.
+    function toggleAgentSettingsSection(key) {
+        const controller = sectionControllers.get(key);
+        if (!controller) return false;
+
+        controller.setCollapsed(!controller.container.classList.contains('collapsed'));
+        void updateSectionSummary(key);
+        void persistCollapseStatesForCurrentSelection();
+        scheduleStickyButtonsRefresh();
+        return true;
     }
 
     function buildIdentitySummary() {
@@ -2171,7 +2143,8 @@ function setupParamsCollapsible() {
     }
 
     function buildModelSummary() {
-        return agentModelInput?.value?.trim() || '未选择模型';
+        const resolvedModelInput = getAgentControl('agentModel') || agentModelInput;
+        return resolvedModelInput?.value?.trim() || '未选择模型';
     }
 
     function buildParamsSummary() {
@@ -2180,38 +2153,48 @@ function setupParamsCollapsible() {
         const maxOutput = agentMaxOutputTokensInput?.value || '未设置';
         const topP = agentTopPInput?.value || '未设置';
         const topK = agentTopKInput?.value || '未设置';
-        const streamOutput = document.getElementById('agentStreamOutputTrue')?.checked ? '流式' : '非流式';
+        const isStream = getAgentControl('agentStreamOutputTrue')?.checked;
 
-        return [
-            `Temperature: ${temperature}`,
-            `上下文: ${contextLimit}`,
-            `最大输出: ${maxOutput}`,
-            `Top P: ${topP}`,
-            `Top K: ${topK}`,
-            `输出: ${streamOutput}`
-        ].join('\n');
+        const formatTokens = val => {
+            const num = parseInt(val, 10);
+            if (!Number.isFinite(num)) return val;
+            if (num >= 1000000) return `${(num / 1000000).toFixed(num % 1000000 === 0 ? 0 : 1)}M`;
+            if (num >= 1000) return `${(num / 1000).toFixed(num % 1000 === 0 ? 0 : 1)}k`;
+            return String(num);
+        };
+
+        const pills = [
+            { label: `Temp: ${temperature}`, active: temperature !== '未设置' },
+            { label: `上下文: ${formatTokens(contextLimit)}` },
+            { label: `输出: ${formatTokens(maxOutput)}` },
+            { label: isStream ? '流式' : '非流式', active: isStream }
+        ];
+
+        return {
+            kind: 'pills',
+            pills,
+            text: `Temperature: ${temperature} 上下文: ${contextLimit} 输出: ${isStream ? '流式' : '非流式'}`
+        };
     }
 
     function buildTtsSummary() {
         const primaryVoice = agentTtsVoicePrimarySelect?.selectedOptions?.[0]?.textContent?.trim()
             || agentTtsVoicePrimarySelect?.value
             || '不使用语音';
-        const primaryRegex = agentTtsRegexPrimaryInput?.value?.trim() || '全部';
-        const secondaryVoice = agentTtsVoiceSecondarySelect?.selectedOptions?.[0]?.textContent?.trim()
-            || agentTtsVoiceSecondarySelect?.value
-            || '不使用';
-        const secondaryRegex = agentTtsRegexSecondaryInput?.value?.trim() || '无';
         const speed = agentTtsSpeedSlider?.value || '1.0';
-        const directorPromptCount = currentAgentTtsDirectorPrompts.filter(item => String(item || '').trim()).length;
+        const directorCount = currentAgentTtsDirectorPrompts.length;
 
-        return [
-            `主语言: ${primaryVoice}`,
-            `主语言正则: ${primaryRegex}`,
-            `副语言: ${secondaryVoice}`,
-            `副语言正则: ${secondaryRegex}`,
-            `导演提示词: ${directorPromptCount} 条`,
-            `语速: ${speed}`
-        ].join('\n');
+        const pills = [
+            { label: `音色: ${primaryVoice}`, active: primaryVoice !== '不使用语音' },
+            { label: `语速: ${speed}x` },
+            { label: directorCount ? `导演词: ${directorCount}条` : '无导演词', active: directorCount > 0 }
+        ];
+
+        return {
+            kind: 'pills',
+            pills,
+            text: `主语言: ${primaryVoice} 语速: ${speed}`
+        };
     }
 
     function buildRegexSummary() {
@@ -2220,6 +2203,7 @@ function setupParamsCollapsible() {
     }
 
     function setupAgentSettingsSections() {
+        refreshAgentControls();
         sectionControllers.clear();
 
         createSectionController('identity', buildIdentitySummary);
@@ -2248,14 +2232,14 @@ function setupParamsCollapsible() {
                 agentTtsRegexPrimaryInput,
                 agentTtsRegexSecondaryInput,
                 agentTtsSpeedSlider,
-                agentModelInput,
-                document.getElementById('agentStreamOutputTrue'),
-                document.getElementById('agentStreamOutputFalse'),
+                agentModelInput || getAgentControl('agentModel'),
+                getAgentControl('agentStreamOutputTrue'),
+                getAgentControl('agentStreamOutputFalse'),
                 agentTtsVoicePrimarySelect,
                 agentTtsVoiceSecondarySelect
-            ].forEach(element => bindSummaryRefresh(element, ['input', 'change']));
+            ].filter(Boolean).forEach(element => bindSummaryRefresh(element, ['input', 'change']));
 
-            const systemPromptContainer = document.getElementById('systemPromptContainer');
+            const systemPromptContainer = getAgentControl('systemPromptContainer');
             if (systemPromptContainer && !systemPromptContainer.dataset.summaryRefreshBound) {
                 const schedulePromptRefresh = () => {
                     window.setTimeout(() => updateSectionSummary('prompt'), 0);
@@ -2291,27 +2275,44 @@ function setupParamsCollapsible() {
 
         const summaryValue = await Promise.resolve(controller.buildSummary());
 
-        if (summaryValue && typeof summaryValue === 'object' && summaryValue.kind === 'identity') {
-            controller.summary.classList.add('summary-with-avatar');
-            controller.summary.innerHTML = '';
+        if (summaryValue && typeof summaryValue === 'object') {
+            if (summaryValue.kind === 'identity') {
+                controller.summary.classList.add('summary-with-avatar');
+                controller.summary.classList.remove('summary-pills-row');
+                controller.summary.innerHTML = '';
 
-            const avatar = document.createElement('img');
-            avatar.className = 'agent-settings-summary-avatar';
-            avatar.src = summaryValue.avatarSrc || 'assets/default_avatar.png';
-            avatar.alt = '';
-            avatar.width = 30;
-            avatar.height = 30;
+                const avatar = document.createElement('img');
+                avatar.className = 'agent-settings-summary-avatar';
+                avatar.src = summaryValue.avatarSrc || 'assets/default_avatar.png';
+                avatar.alt = '';
+                avatar.width = 30;
+                avatar.height = 30;
 
-            const label = document.createElement('span');
-            label.className = 'agent-settings-summary-label';
-            label.textContent = summaryValue.text || '未命名 Agent';
+                const label = document.createElement('span');
+                label.className = 'agent-settings-summary-label';
+                label.textContent = summaryValue.text || '未命名 Agent';
 
-            controller.summary.appendChild(avatar);
-            controller.summary.appendChild(label);
-            return;
+                controller.summary.appendChild(avatar);
+                controller.summary.appendChild(label);
+                return;
+            }
+
+            if (summaryValue.kind === 'pills') {
+                controller.summary.classList.remove('summary-with-avatar');
+                controller.summary.classList.add('summary-pills-row');
+                controller.summary.innerHTML = '';
+
+                summaryValue.pills.forEach(item => {
+                    const pill = document.createElement('span');
+                    pill.className = `vcp-uiux-pill pill${item.active ? ' active' : ''}`;
+                    pill.textContent = item.label;
+                    controller.summary.appendChild(pill);
+                });
+                return;
+            }
         }
 
-        controller.summary.classList.remove('summary-with-avatar');
+        controller.summary.classList.remove('summary-with-avatar', 'summary-pills-row');
         controller.summary.textContent = typeof summaryValue === 'string' ? summaryValue : '';
     }
 
@@ -2338,27 +2339,8 @@ function setupParamsCollapsible() {
     }
 
     async function persistCollapseStatesForCurrentSelection() {
-        const currentSelectedItem = refs.currentSelectedItemRef?.get?.();
-        const agentId = editingAgentIdInput?.value || currentSelectedItem?.id;
-        if (!agentId || !electronAPI?.updateAgentConfig) {
-            return;
-        }
-
-        const collapseStates = getCurrentCollapseStates();
-        const signature = `${agentId}:${JSON.stringify(collapseStates)}`;
-        if (signature === lastPersistedCollapseStateSignature) {
-            return;
-        }
-
-        syncCollapseStatesToCurrentSelection(collapseStates);
-        lastPersistedCollapseStateSignature = signature;
-
-        try {
-            await electronAPI.updateAgentConfig(agentId, { uiCollapseStates: collapseStates });
-        } catch (error) {
-            console.error('[SettingsManager] Failed to persist collapse states:', error);
-            lastPersistedCollapseStateSignature = '';
-        }
+        // 兼容展示层命令名称；折叠状态随保存按钮提交，不单独写配置。
+        return { skipped: true, reason: 'manual-save-only' };
     }
 
     /**
@@ -2409,34 +2391,10 @@ function setupParamsCollapsible() {
     }
 
     /**
-     * 设置自定义样式容器的折叠功能
-     */
-    function setupStyleCollapsible() {
-        const styleContainer = document.querySelector('.agent-style-collapsible-container');
-        const styleHeader = document.getElementById('styleCollapseHeader');
-
-        if (!styleContainer || !styleHeader) {
-            console.warn('[SettingsManager] Style collapsible elements not found');
-            return;
-        }
-
-        if (!styleHeader.dataset.collapsibleBound) {
-            styleHeader.addEventListener('click', () => {
-                styleContainer.classList.toggle('collapsed');
-                persistCollapseStatesForCurrentSelection();
-                scheduleStickyButtonsRefresh();
-            });
-            styleHeader.dataset.collapsibleBound = 'true';
-        }
-
-        console.log('[SettingsManager] Style collapsible setup complete.');
-    }
-
-    /**
      * 处理重置头像颜色按钮点击
      */
     function handleResetAvatarColors() {
-        const agentAvatarPreview = document.getElementById('agentAvatarPreview');
+        const agentAvatarPreview = getAgentControl('agentAvatarPreview');
 
         if (!agentAvatarPreview || !agentAvatarPreview.src || agentAvatarPreview.src === '#' || agentAvatarPreview.src.includes('default_avatar.png')) {
             uiHelper.showToastNotification('请先上传头像后再重置颜色', 'warning');
@@ -2511,7 +2469,8 @@ function setupParamsCollapsible() {
      * 应用名片CSS到设置页面的Agent身份容器
      */
     function applyCardCssToIdentityContainer(cardCss) {
-        const identityContainer = document.querySelector('#agentSettingsContainer .agent-identity-container');
+        const agentHost = window.VCPSettingsSidebar?.getView?.('agent') || document.getElementById('agentSettingsContainer');
+        const identityContainer = agentHost?.querySelector?.('.agent-identity-container') || document.querySelector('#agentSettingsContainer .agent-identity-container');
         if (!identityContainer) return;
 
         if (cardCss && cardCss.trim()) {

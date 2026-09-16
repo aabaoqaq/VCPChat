@@ -678,6 +678,7 @@ async function handleRegenerateResponse(originalAssistantMessage) {
     const globalSettingsVal = mainRefs.globalSettingsRef.get();
     let streamingRequested = false;
     let streamContext = null;
+    let regenerationThinkingItem = null;
 
     if (!currentSelectedItemVal.id || currentSelectedItemVal.type !== 'agent' || !currentTopicIdVal || !originalAssistantMessage || originalAssistantMessage.role !== 'assistant') {
         uiHelper.showToastNotification("只能为 Agent 的回复进行重新生成。", "warning");
@@ -719,10 +720,37 @@ async function handleRegenerateResponse(originalAssistantMessage) {
         avatarColor: currentSelectedItemVal.config?.avatarCalculatedColor,
     };
 
-    contextMenuDependencies.renderMessage(regenerationThinkingMessage, false);
+    regenerationThinkingItem = await contextMenuDependencies.renderMessage(regenerationThinkingMessage, false);
     currentChatHistoryArray.push(regenerationThinkingMessage);
     mainRefs.currentChatHistoryRef.set([...currentChatHistoryArray]);
-    ownerWindow.updateSendButtonState?.();
+
+    if (regenerationThinkingItem) {
+        // renderMessage 已为本次重新回复排过第一次滚动。这里不能紧接着再次走
+        // 通用 scrollToBottom：同一帧的请求会被其 frameId 合并，无法在思考
+        // 占位完成布局后使用新的 scrollHeight。与普通发送保持一致，下一布局帧
+        // 直接提交占位后的真实底部，同时防止切换会话后误滚新的 Surface。
+        const scrollContainer = regenerationThinkingItem.closest('.chat-messages-container');
+        ownerWindow?.requestAnimationFrame?.(() => {
+            const activeItem = mainRefs.currentSelectedItemRef?.get?.();
+            if (
+                regenerationThinkingItem.isConnected
+                && scrollContainer?.isConnected
+                && activeItem?.id === currentSelectedItemVal.id
+                && activeItem?.type === currentSelectedItemVal.type
+                && mainRefs.currentTopicIdRef?.get?.() === currentTopicIdVal
+            ) {
+                scrollContainer.scrollTop = Math.max(
+                    0,
+                    scrollContainer.scrollHeight - scrollContainer.clientHeight
+                );
+            }
+        });
+    }
+
+    // 重新回复的思考占位已经同时进入 DOM 与 history，此时即可投影中止按钮。
+    // 旧路径调用 window.updateSendButtonState，但发送状态现由 MainChatSendOwner
+    // 通过显式 messageCommands 能力持有，不再暴露同名窗口全局函数。
+    mainRefs.messageCommands?.updateSendButtonState?.();
 
     try {
         const agentConfig = await electronAPI.getAgentConfig(currentSelectedItemVal.id);
@@ -1016,6 +1044,23 @@ async function handleRegenerateResponse(originalAssistantMessage) {
         };
         streamingRequested = modelConfigForVCP.stream;
         streamContext = context;
+
+        // 与正常单聊发送保持同一运行态契约：流式请求必须在交给上游前建立
+        // StreamProjection 所有权。它会给占位同时添加 streaming + thinking，
+        // 从而启用循环省略号和外层流光边框；首个 IPC start/thinking 事件再次
+        // 初始化时会由 StreamProjection 的幂等检查直接复用当前气泡。
+        const startStreamFn = typeof contextMenuDependencies.startStream === 'function'
+            ? contextMenuDependencies.startStream
+            : contextMenuDependencies['startStreamingMessage'];
+        if (streamingRequested && typeof startStreamFn === 'function') {
+            await startStreamFn({
+                ...regenerationThinkingMessage,
+                ...context,
+                context,
+                content: '',
+                isThinking: true
+            }, regenerationThinkingItem);
+        }
         
         const vcpResult = await electronAPI.sendToVCP(
             globalSettingsVal.vcpServerUrl,

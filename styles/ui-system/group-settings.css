@@ -182,6 +182,7 @@
         box-shadow: none;
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
+        transition: border-color 0.15s ease, background-color 0.15s ease;
     }
 
     html .vcp-ui-scope #groupSettingsContainer :is(input[type="text"], select) {
@@ -189,7 +190,7 @@
         min-height: 34px;
         max-height: 34px;
         padding: 0 var(--vcp-ui-space-3);
-        border-radius: 16px;
+        border-radius: var(--vcp-settings-radius, 8px);
     }
 
     html .vcp-ui-scope #groupSettingsContainer select {
@@ -200,18 +201,18 @@
     html .vcp-ui-scope #groupSettingsContainer textarea {
         min-height: 96px;
         padding: var(--vcp-ui-space-2) var(--vcp-ui-space-3);
-        border-radius: var(--vcp-ui-radius-md);
+        border-radius: var(--vcp-settings-radius, 8px);
     }
 
     html .vcp-ui-scope #groupSettingsContainer :is(input[type="text"], select, textarea):hover {
-        border-color: var(--vcp-ui-control-focus);
+        border-color: color-mix(in srgb, var(--highlight-text, var(--vcp-ui-control-focus)) 45%, var(--vcp-ui-control-border));
         box-shadow: none;
     }
 
     html .vcp-ui-scope #groupSettingsContainer :is(input[type="text"], select, textarea):focus, html .vcp-ui-scope #groupSettingsContainer :is(input[type="text"], select, textarea):focus-visible {
-        border-color: var(--vcp-ui-control-focus);
+        border-color: var(--highlight-text, var(--vcp-ui-control-focus));
         outline: none;
-        box-shadow: 0 0 0 2px var(--vcp-ui-focus-ring);
+        box-shadow: none;
     }
 
     html .vcp-ui-scope #groupSettingsContainer .group-members-list-container {
@@ -230,14 +231,21 @@
 
     html .vcp-ui-scope #groupSettingsContainer .group-member-item label {
         min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-start;
+        min-height: 36px;
+        margin: 0;
         padding: var(--vcp-ui-space-2) var(--vcp-ui-space-3);
         border: 1px solid var(--vcp-ui-control-border);
-        border-radius: var(--vcp-ui-radius-md);
+        border-radius: var(--vcp-settings-radius, 8px);
         color: var(--vcp-ui-text-1);
         background: var(--vcp-ui-control-bg);
         box-shadow: none;
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
+        box-sizing: border-box;
+        line-height: 1;
     }
 
     html .vcp-ui-scope #groupSettingsContainer .group-member-item label:hover {
@@ -274,6 +282,111 @@
         box-shadow: none;
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-order-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--vcp-ui-space-2);
+        max-height: 240px;
+        overflow-y: auto;
+        padding: var(--vcp-ui-space-1) 0;
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-order-item {
+        display: flex;
+        align-items: center;
+        gap: var(--vcp-ui-space-2);
+        min-height: 40px;
+        padding: var(--vcp-ui-space-2) var(--vcp-ui-space-3);
+        box-sizing: border-box;
+        border: 1px solid var(--vcp-ui-control-border);
+        border-radius: var(--vcp-settings-radius, 8px);
+        color: var(--vcp-ui-text-0);
+        background: var(--vcp-ui-control-bg);
+        cursor: grab;
+        user-select: none;
+        transition: border-color var(--vcp-ui-transition-fast), background var(--vcp-ui-transition-fast);
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-order-item:hover {
+        border-color: var(--vcp-ui-control-focus);
+        background: var(--vcp-ui-fill-1);
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-drag-handle {
+        color: var(--vcp-ui-text-3);
+        font-size: var(--vcp-ui-font-body);
+        line-height: 1;
+        cursor: grab;
+        flex-shrink: 0;
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-order-item .avatar-small {
+        width: 24px;
+        height: 24px;
+        border-radius: var(--vcp-ui-radius-full);
+        object-fit: cover;
+        flex-shrink: 0;
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-name {
+        flex: 1;
+        min-width: 0;
+        font-size: var(--vcp-ui-font-body);
+        color: var(--vcp-ui-text-0);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-speaker-order-controls {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        flex-shrink: 0;
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-order-move-btn {
+        width: 24px;
+        height: 24px;
+        min-width: 24px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--vcp-ui-control-border);
+        border-radius: var(--vcp-ui-radius-sm);
+        background: var(--vcp-ui-fill-0);
+        color: var(--vcp-ui-text-2);
+        cursor: pointer;
+        font-size: var(--vcp-ui-font-caption);
+        line-height: 1;
+        transition: border-color var(--vcp-ui-transition-fast), background var(--vcp-ui-transition-fast), color var(--vcp-ui-transition-fast);
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .sequential-order-move-btn:hover {
+        border-color: var(--vcp-ui-control-focus);
+        background: var(--vcp-ui-fill-2);
+        color: var(--vcp-ui-text-0);
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .group-settings-helper-text {
+        font-size: var(--vcp-ui-font-caption);
+        color: var(--vcp-ui-text-3);
+        line-height: var(--vcp-ui-line-body);
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .member-tag-input-item {
+        display: flex;
+        flex-direction: column;
+        gap: var(--vcp-ui-space-1);
+    }
+
+    html .vcp-ui-scope #groupSettingsContainer .member-tag-input-item label {
+        font-size: var(--vcp-ui-font-caption);
+        color: var(--vcp-ui-text-2);
+        font-weight: 500;
     }
 
     html .vcp-ui-scope #groupSettingsContainer :is(.group-settings-toggle-btn, input, select, textarea, button):focus-visible {

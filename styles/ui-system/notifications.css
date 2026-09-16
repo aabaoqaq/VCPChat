@@ -77,6 +77,16 @@
         z-index: 1;
     }
 
+    /*
+     * The header becomes a stacking context in translucent presentation modes.
+     * Raise that context while its menu is open so the later status row cannot
+     * paint over the dropdown, regardless of DOM order.
+     */
+    html .vcp-ui-scope.notifications-sidebar > .notifications-header:has(#nextUiNotificationMenu:not([hidden])) {
+        z-index: var(--vcp-ui-z-dropdown);
+        overflow: visible;
+    }
+
     html body:is(.chat-presentation-panel, .chat-presentation-immersive) .vcp-ui-scope .notifications-header {
         background: var(--chat-presentation-surface);
         backdrop-filter: var(--chat-presentation-surface-filter);
@@ -277,6 +287,24 @@
         }
     }
 
+    /* At compact window widths the notification rail can retain a desktop
+     * width while its header is laid out against the viewport edge. Keep the
+     * menu inside that header instead of allowing an absolute right anchor to
+     * escape beyond the window. */
+    @media (max-width: 960px) {
+        html .vcp-ui-scope .next-ui-notification-actions {
+            position: static;
+        }
+
+        html .vcp-ui-scope .next-ui-notification-menu {
+            position: fixed;
+            top: calc(var(--vcp-ui-shell-header-height) + var(--vcp-ui-space-2));
+            right: var(--vcp-ui-space-2);
+            width: min(196px, calc(100vw - var(--vcp-ui-space-4)));
+            min-width: 0;
+        }
+    }
+
     html .vcp-ui-scope #vchatAppTray {
         display: flex;
         min-height: calc(var(--vcp-ui-control-md) + var(--vcp-ui-space-4));
@@ -429,7 +457,7 @@
     }
 
     html .vcp-ui-scope #appTrayDrawer {
-        right: var(--vcp-ui-space-5);
+        right: var(--vcp-ui-space-3);
         bottom: calc(100% + var(--vcp-ui-space-2));
         left: auto;
         width: min(288px, calc(100vw - var(--vcp-ui-space-6)));
@@ -476,12 +504,29 @@
         height: var(--vcp-ui-icon-md);
     }
 
-    html .vcp-ui-scope #appTrayDrawer::after {
-        right: -2px;
-        background: var(--vcp-ui-bg-1);
+    /*
+     * Use one bordered diamond instead of two differently sized clipped
+     * triangles. The old layers produced a visible antialiasing seam at
+     * fractional Windows/Electron display scales.
+     */
+    html .vcp-ui-scope #appTrayDrawer::before {
+        content: none;
+        display: none;
     }
 
-    html .vcp-ui-scope #appTrayDrawer::before {
-        right: -3px;
+    html .vcp-ui-scope #appTrayDrawer::after {
+        bottom: -6px;
+        right: 7px;
+        width: 11px;
+        height: 11px;
+        box-sizing: border-box;
+        clip-path: none;
+        border-right: 1px solid var(--vcp-ui-border);
+        border-bottom: 1px solid var(--vcp-ui-border);
+        background: var(--vcp-ui-bg-1);
+        transform: rotate(45deg);
+        transform-origin: center;
+        z-index: 0;
+        pointer-events: none;
     }
 }

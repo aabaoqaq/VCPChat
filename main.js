@@ -152,6 +152,8 @@ const { createEmbeddedAppSessionManager } = require('./modules/services/embedded
 const { SenderTaskRegistry } = require('./modules/services/senderTaskRegistry');
 const { ChatDataServiceFacade } = require('./modules/services/chatDataService');
 const { createHistoryWatcherLeaseManager } = require('./modules/services/historyWatcherLeaseManager');
+const { HistoryMutationQueue } = require('./modules/services/historyMutationQueue');
+const { PluginAgentOperationService } = require('./modules/services/pluginAgentOperationService');
 // chokidar is now lazy-loaded
 
 // --- File Watcher ---
@@ -287,6 +289,8 @@ let openChildWindows = [];
 let distributedServer = null; // To hold the distributed server instance
 let distributedServerStartPromise = null;
 let chatDataService = null; // Optional VCP-CDS shadow service.
+let historyMutationQueue = null;
+let pluginAgentOperationService = null;
 let appSettingsManager = null;
 let loomManager = null;
 let scriptoriumAgentControl = null;
@@ -483,7 +487,8 @@ function startDistributedServerAfterRenderer() {
                 handleDesktopRemoteControl: desktopRemoteHandlers.handleDesktopRemoteControl,
                 chatDataService,
                 loomManager,
-                scriptoriumAgentControl
+                scriptoriumAgentControl,
+                pluginAgentOperationService
             });
             distributedServer = server;
             await server.initialize();
@@ -652,6 +657,12 @@ async function performQuitCleanup() {
     appQuitCleanupPromise = (async () => {
         await historyWatcherLeases.dispose();
 
+        try {
+            await voiceHandlers.shutdownVoiceInputEngine();
+        } catch (error) {
+            console.warn('[Main] Failed to shut down native voice input engine:', error.message || error);
+        }
+
         if (distributedServer) {
             console.log('[Main] Stopping distributed server...');
             try {
@@ -679,6 +690,9 @@ async function performQuitCleanup() {
             }
         }
 
+        await historyMutationQueue?.dispose?.();
+        historyMutationQueue = null;
+        pluginAgentOperationService = null;
         await stopAudioEngine();
     })();
 
@@ -1067,6 +1081,19 @@ if (!gotTheLock) {
         const AgentConfigManager = require('./modules/utils/agentConfigManager');
         appSettingsManager = new AppSettingsManager(SETTINGS_FILE);
         const agentConfigManager = new AgentConfigManager(AGENT_DIR);
+        historyMutationQueue = new HistoryMutationQueue({
+            userDataDir: USER_DATA_DIR,
+            fileWatcher,
+            logger: console
+        });
+        pluginAgentOperationService = new PluginAgentOperationService({
+            agentDir: AGENT_DIR,
+            userDataDir: USER_DATA_DIR,
+            agentConfigManager,
+            historyMutationQueue,
+            appDataRoot: APP_DATA_ROOT_IN_PROJECT,
+            logger: console
+        });
 
         // Phase 1: VCP-CDS runs only as an optional shadow mirror. Start it in
         // the background so database reconciliation can never delay the window
@@ -1096,7 +1123,7 @@ if (!gotTheLock) {
         appSettingsManager.startAutoBackup(USER_DATA_DIR); // Start auto backup
         agentConfigManager.startCleanupTimer(); // Start agent config cleanup
 
-        settingsHandlers.initialize({ SETTINGS_FILE, USER_AVATAR_FILE, AGENT_DIR, settingsManager: appSettingsManager, agentConfigManager }); // Initialize settings handlers
+        settingsHandlers.initialize({ SETTINGS_FILE, USER_AVATAR_FILE, AGENT_DIR, settingsManager: appSettingsManager, agentConfigManager, mainWindow }); // Initialize settings handlers
         ragHandlers.initialize({ mainWindow, openChildWindows, settingsManager: appSettingsManager, SETTINGS_FILE });
 
         // RAG 独立模式：不创建主窗口，仅初始化 RAG 所需 IPC 并直接打开 RAG 窗口
@@ -1406,7 +1433,8 @@ if (!gotTheLock) {
             getSelectionListenerStatus: assistantHandlers.getSelectionListenerStatus,
             stopSelectionListener: assistantHandlers.stopSelectionListener,
             startSelectionListener: assistantHandlers.startSelectionListener,
-            fileWatcher // Inject fileWatcher here as well
+            fileWatcher, // Inject fileWatcher here as well
+            historyMutationQueue
         });
         regexHandlers.initialize({ AGENT_DIR });
         chatHandlers.initialize(mainWindow, {
@@ -1419,7 +1447,9 @@ if (!gotTheLock) {
             startSelectionListener: assistantHandlers.startSelectionListener,
             getMusicState: musicHandlers.getMusicState,
             fileWatcher, // 注入文件监控器
-            agentConfigManager
+            agentConfigManager,
+            settingsManager: appSettingsManager,
+            historyMutationQueue
         });
 
         // A renderer claims a lease before beginning asynchronous selection.

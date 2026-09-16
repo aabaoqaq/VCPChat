@@ -32,7 +32,15 @@ function createStreamCapabilities(root, services) {
             }
         },
         dispatchTerminal: detail => services.dispatchTerminal?.(detail),
+        onProjectionSettled(value) {
+            const terminal = value?.terminal;
+            const event = terminal
+                ? { type: terminal.kind === 'completed' ? 'completed' : terminal.kind, messageId: value.messageId, context: value.context }
+                : null;
+            services.notifySendStateChanged?.({ ...value, event });
+        },
         onSettled(value) {
+            // 最终 outcome 发布后的幂等兜底，覆盖持久化失败等异常路径。
             services.notifySendStateChanged?.(value);
         },
         reportError,
@@ -110,7 +118,11 @@ export function createMainChatSurfaceAdapter({
         presentationState,
         disposeRenderer,
     });
-    renderer.initializeMessageRenderer({ ...renderDependencies, chatDomRenderer: surface.renderer });
+    renderer.initializeMessageRenderer({
+        ...renderDependencies,
+        chatDomRenderer: surface.renderer,
+        streamStartCapability: message => streamServices.streamProjection.startStreamingMessage(message),
+    });
     const streamCapabilities = createStreamCapabilities(root, streamServices);
     const bridge = createVcpStreamBridge({
         createConsumer: initialEvent => createMainChatStreamConsumer(initialEvent, {
@@ -142,6 +154,10 @@ export function createMainChatSurfaceAdapter({
         domRenderer: surface.renderer,
         streamRoutes: Object.freeze({ register: registerStreamRoute }),
         acceptStreamEvent(event) { return disposed ? false : bridge.accept(event); },
+        startStream(message, messageItem = null) {
+            if (disposed) return Promise.resolve(false);
+            return streamServices.streamProjection.startStreamingMessage(message, messageItem);
+        },
         cancelStream(messageId, reason) { return disposed ? Promise.resolve(null) : bridge.cancelOperation(messageId, reason); },
         async dispose() {
             if (disposed) return;

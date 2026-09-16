@@ -263,6 +263,75 @@ function resolveEffectiveModel(groupConfig, agentConfig) {
 
 
 
+function normalizeUniqueStringArray(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter((item, index) => (
+        typeof item === 'string'
+        && item.trim() !== ''
+        && value.indexOf(item) === index
+    ));
+}
+
+function normalizeGroupModeSettings(config = {}) {
+    const members = normalizeUniqueStringArray(config.members);
+    const existingModeSettings = config.modeSettings && typeof config.modeSettings === 'object'
+        ? config.modeSettings
+        : {};
+    const legacySequentialOrder = normalizeUniqueStringArray(config.sequentialSpeakerOrder);
+    const configuredSequentialOrder = normalizeUniqueStringArray(
+        existingModeSettings.sequential?.speakerOrder
+    );
+    const preferredSequentialOrder = configuredSequentialOrder.length > 0
+        ? configuredSequentialOrder
+        : legacySequentialOrder;
+    const memberSet = new Set(members);
+    const sequentialSpeakerOrder = [
+        ...preferredSequentialOrder.filter(memberId => memberSet.has(memberId)),
+        ...members.filter(memberId => !preferredSequentialOrder.includes(memberId))
+    ];
+
+    const legacyMemberTags = config.memberTags && typeof config.memberTags === 'object'
+        ? config.memberTags
+        : {};
+    const naturalSettings = existingModeSettings.naturerandom && typeof existingModeSettings.naturerandom === 'object'
+        ? existingModeSettings.naturerandom
+        : {};
+    const memberTags = {
+        ...legacyMemberTags,
+        ...(naturalSettings.memberTags && typeof naturalSettings.memberTags === 'object'
+            ? naturalSettings.memberTags
+            : {})
+    };
+    const tagMatchMode = naturalSettings.tagMatchMode === 'natural' || config.tagMatchMode === 'natural'
+        ? 'natural'
+        : 'strict';
+
+    return {
+        ...config,
+        members,
+        modeSettings: {
+            ...existingModeSettings,
+            sequential: {
+                ...(existingModeSettings.sequential || {}),
+                speakerOrder: sequentialSpeakerOrder
+            },
+            naturerandom: {
+                ...naturalSettings,
+                tagMatchMode,
+                memberTags
+            },
+            invite_only: {
+                ...(existingModeSettings.invite_only || {})
+            }
+        },
+        // 同步旧字段，确保旧版本客户端仍能读取。
+        sequentialSpeakerOrder,
+        tagMatchMode,
+        memberTags
+    };
+}
+
+
 /**
  * 创建一个新的 AgentGroup
  * @param {string} groupName - 群组名称
@@ -290,7 +359,14 @@ async function createAgentGroup(groupName, initialConfig = {}) {
             avatarCalculatedColor: null, // 新增：用于存储头像计算出的颜色
             members: [],
             mode: 'sequential', // 可选: 'sequential', 'naturerandom', 'invite_only'
-            tagMatchMode: 'strict', // 可选: 'strict'(原始行为), 'natural'(智能触发，区分tag来源)
+            modeSettings: {
+                sequential: { speakerOrder: [] },
+                naturerandom: { tagMatchMode: 'strict', memberTags: {} },
+                invite_only: {}
+            },
+            // 兼容旧版本读取；权威配置保存在 modeSettings。
+            sequentialSpeakerOrder: [],
+            tagMatchMode: 'strict',
             memberTags: {},
             groupPrompt: '',
             invitePrompt: '现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。',
@@ -301,7 +377,16 @@ async function createAgentGroup(groupName, initialConfig = {}) {
             topics: [{ id: `group_topic_${Date.now()}`, name: "主要群聊", createdAt: Date.now() }]
         };
 
-        const configToSave = { ...defaultConfig, ...initialConfig, id: groupId, name: groupName };
+        const configToSave = normalizeGroupModeSettings({
+            ...defaultConfig,
+            ...initialConfig,
+            modeSettings: {
+                ...defaultConfig.modeSettings,
+                ...(initialConfig.modeSettings || {})
+            },
+            id: groupId,
+            name: groupName
+        });
         await fs.writeJson(path.join(groupDir, 'config.json'), configToSave, { spaces: 2 });
 
         const defaultTopicHistoryDir = path.join(mainAppPaths.USER_DATA_DIR, groupId, 'topics', configToSave.topics[0].id);
@@ -334,8 +419,8 @@ async function getAgentGroups() {
             if (stat.isDirectory()) {
                 const configPath = path.join(groupPath, 'config.json');
                 if (await fs.pathExists(configPath)) {
-                    const config = await fs.readJson(configPath);
-                    if (config.avatar) { 
+                    const config = normalizeGroupModeSettings(await fs.readJson(configPath));
+                    if (config.avatar) {
                         config.avatarUrl = `file://${path.join(groupPath, config.avatar)}?t=${Date.now()}`;
                     } else {
                         config.avatarUrl = null; 
@@ -365,7 +450,7 @@ async function getAgentGroupConfig(groupId) {
         const groupDir = path.join(mainAppPaths.AGENT_GROUPS_DIR, groupId);
         const configPath = path.join(groupDir, 'config.json');
         if (await fs.pathExists(configPath)) {
-            const config = await fs.readJson(configPath);
+            const config = normalizeGroupModeSettings(await fs.readJson(configPath));
             if (config.avatar) {
                 config.avatarUrl = `file://${path.join(groupDir, config.avatar)}?t=${Date.now()}`;
             } else {
@@ -405,7 +490,22 @@ async function saveAgentGroupConfig(groupId, configData) {
         // avatarCalculatedColor 也是动态获取的，但如果 main.js 决定持久化它，它应该在 configData 中
         const { avatarUrl, ...dataToSave } = configData; 
 
-        const newConfigData = { ...existingConfig, ...dataToSave, id: groupId };
+        const mergedModeSettings = {
+            ...(existingConfig.modeSettings || {}),
+            ...(dataToSave.modeSettings || {})
+        };
+        Object.keys(mergedModeSettings).forEach(modeName => {
+            mergedModeSettings[modeName] = {
+                ...(existingConfig.modeSettings?.[modeName] || {}),
+                ...(dataToSave.modeSettings?.[modeName] || {})
+            };
+        });
+        const newConfigData = normalizeGroupModeSettings({
+            ...existingConfig,
+            ...dataToSave,
+            modeSettings: mergedModeSettings,
+            id: groupId
+        });
 
         // Backend guard: unified model mode must have a non-empty model id.
         if (newConfigData.useUnifiedModel === true) {
@@ -1772,6 +1872,51 @@ async function deleteGroupTopic(groupId, topicIdToDelete) {
     return { success: true, remainingTopics: result.agentGroup.topics };
 }
 
+async function regenerateGroupTopicTitle(groupId, topicId) {
+    if (!groupId || !topicId) {
+        return { success: false, error: '群组ID或话题ID不能为空。' };
+    }
+
+    try {
+        const groupConfig = await getAgentGroupConfig(groupId);
+        const topic = groupConfig?.topics?.find(candidate => candidate.id === topicId);
+        if (!topic) {
+            return { success: false, error: `未找到群组话题 ${topicId}。` };
+        }
+
+        const groupHistory = await getGroupChatHistory(groupId, topicId);
+        const effectiveMessageCount = Array.isArray(groupHistory)
+            ? groupHistory.filter(message => message && message.role !== 'system' && message.isThinking !== true).length
+            : 0;
+        if (effectiveMessageCount === 0) {
+            return { success: false, error: '该话题还没有可用于生成标题的对话。' };
+        }
+
+        const globalVcpSettings = await getVcpGlobalSettings();
+        if (!globalVcpSettings.vcpUrl) {
+            return { success: false, error: '请先在全局设置中配置 VCP 服务器 URL。' };
+        }
+
+        const newTitle = await topicTitleManager.generateTitleForHistory(groupHistory, globalVcpSettings);
+        if (!newTitle) {
+            return { success: false, error: 'AI 未能生成有效的话题标题。' };
+        }
+
+        const saveResult = await saveGroupTopicTitle(groupId, topicId, newTitle);
+        if (!saveResult.success) return saveResult;
+
+        return {
+            success: true,
+            newTitle,
+            topics: saveResult.topics,
+            sourceMessageCount: Math.min(effectiveMessageCount, topicTitleManager.MIN_MESSAGES_FOR_SUMMARY)
+        };
+    } catch (error) {
+        console.error(`[GroupChat] 重新生成群组话题 ${topicId} 标题失败:`, error);
+        return { success: false, error: error.message };
+    }
+}
+
 async function saveGroupTopicTitle(groupId, topicId, newTitle) {
     let groupConfig = await getAgentGroupConfig(groupId);
     if (!groupConfig || !Array.isArray(groupConfig.topics)) {
@@ -1936,5 +2081,6 @@ module.exports = {
     createNewTopicForGroup,
     deleteGroupTopic,
     saveGroupTopicTitle,
+    regenerateGroupTopicTitle,
     getGroupChatHistory,
 };
